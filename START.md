@@ -3,6 +3,22 @@
 Use this guide on a clean checkout or hand it to a local setup agent. Commands
 are for a POSIX shell and run from the repository root unless noted.
 
+## Windows: one-command start
+
+Run `start.cmd` in Command Prompt from the repository root. Open
+<http://127.0.0.1:8765> once the server starts. Keep the window open and
+press Ctrl-C to stop.
+
+The launcher uses Node.js 22 and npm on Windows to build the editor.
+The backend needs Linux file locking, so it runs in your default WSL
+distribution. For a fresh WSL setup, install Python 3.10 with `venv` and
+FFmpeg/ffprobe **inside WSL** (with the capabilities listed below).
+The launcher reuses the tools under `~/.streamframe-tools` if present;
+otherwise it uses WSL's `python3.10` and `ffmpeg` to set up the backend.
+Jobs use WSL's `~/.streamframe` by default, and local inputs use Linux
+paths. Neither Windows Python nor Windows FFmpeg is needed. The launcher
+does not download Whisper weights; see below if transcription is needed.
+
 ## 1. Check prerequisites
 
 - **Python 3.10**, with `venv` and `pip`. Use `python3.10` below, not an
@@ -126,33 +142,53 @@ public service.
 
 ## 5. Capture, review, and export
 
-From **Add a video**, choose the matching source type:
+From **Sources**, select **Add source** and choose the matching source type:
 
 | Source | What to do |
 | --- | --- |
-| Twitch channel | Choose **A streamer or channel**. Enter a Twitch username or public channel URL. In **Capture options**, use **Auto** for live or the latest verified finished archive if offline, **Live now only** for a broadcast, or **Latest finished video only** for an archive. If an archive is selected without a range, it starts at the beginning and uses the capture duration (or ends sooner at EOF). |
-| Public YouTube live | Choose **A streamer or channel** and **Live now only**. Paste the channel or live video URL, or choose **YouTube** and enter its `@handle`. A display name is not a handle. If channel resolution fails, a known public live video URL can avoid channel lookup, but the video itself must still be supported. |
-| Specific Twitch or YouTube archive range | Choose **Part of a finished video**. Enter a public Twitch `/videos/` URL or a public YouTube `watch?v=…` URL, and both start and end in original-video seconds. The selected span must be positive and at most 1,800 seconds. YouTube support is limited to finished videos with a verified timeline in the format described below. |
-| Local video | Choose **A file on this computer** and enter an absolute path readable by the backend. This is not a browser upload. No bounds imports the full file subject to its size limit; end-only starts at zero; start-only takes up to 1,800 seconds or EOF. A specified range can span at most 1,800 seconds. |
+| Twitch channel | Choose **Clip a channel**. Enter a Twitch username or public channel URL. Use **Auto** for live or the latest verified finished archive if offline, **Live now only** for a broadcast, or **Latest finished video only** for an archive. If an archive is selected without a range, it starts at the beginning and uses the capture duration (or ends sooner at EOF). |
+| Public YouTube live | Choose **Clip a channel** and **Live now only**. Paste the channel or live video URL, or choose **YouTube** and enter its `@handle`. A display name is not a handle. If channel resolution fails, a known public live video URL can avoid channel lookup, but the video itself must still be supported. |
+| Specific Twitch or YouTube archive range | Choose **Use a video link**. Enter a public Twitch `/videos/` URL or a public YouTube `watch?v=…` URL, and both start and end as original-video `HH:MM:SS`, `MM:SS`, or seconds. The selected span must be positive and at most 1,800 seconds. YouTube support is limited to finished videos with a verified timeline in the format described below. |
+| Local video | Choose **Use a local file** and enter an absolute path readable by the backend. This is not a browser upload. No bounds imports the full file subject to its size limit; end-only starts at zero; start-only takes up to 1,800 seconds or EOF. A specified range can span at most 1,800 seconds. |
 
-Select **Import** and check the job's resolved source and stage. Single
+Select **Find moments** or **Start live capture** and check the job's stage
+and **Source details**. Single
 live samples default to 60 seconds (1–300 seconds) and finish without
 waiting for the broadcast to end. For manual export, select a candidate,
-review its evidence and preview, adjust timing, crops and captions, then
-select **Save changes** and **Export clip**. Play the finished result under
-**Exported videos** before downloading or sharing it. The webcam panel
-fits the entire selected rectangle, adding padding rather than cutting
-off its edges. A suggested rectangle can be an estimated webcam boundary;
-when no stable boundary is found, the detector can instead suggest a roomy
-head-and-shoulders crop. Check the source guides and adjust the rectangle
-if needed: the guides show the selected region, not the final padded
-composition. Editor timestamps are zero-based within the retrieved range
+review the source preview, and adjust **Trim**, **Framing**, and **Captions**.
+Add an optional **Opening title** to put a short hook across the webcam–gameplay
+divider for the first 2.4 seconds without delaying playback. With the Lobby
+Crew template this is a solid violet card with an inset logo; the centered
+watermark appears once the title clears. Captions show
+short, fixed phrases and highlight each spoken word. A phrase after a pause
+doesn't appear before its audio starts.
+Select **Export clip** to save any changes and start a render. Play the
+finished result under **Exports** before downloading or sharing it. The top
+38% fits the entire webcam rectangle without stretching or cutting its edges.
+A divider separates it from the bottom 62% screen panel. If there is no
+webcam estimate, enable the guide and trace the webcam before exporting.
+For imported sources, webcam edits carry across moments and saving applies
+them to the whole source. The guides show the selected source regions,
+not the final composition. Editor timestamps are zero-based within the retrieved range
 or retained source window, not the original video or wall clock.
+
+On **Sources**, select the export count to see just that video's clips.
+**Edit source** on an export returns to the moment that produced it, when
+the editable video is still available. **Delete export** removes one finished
+clip from StreamFrame. **Delete source** removes the imported copy, saved
+edits, and all its exports. Neither action removes the original video or
+copies you already downloaded.
+
+Reels export at **1080 × 1920**. That is the output size, not the original
+detail: a low-resolution source or a tight crop can still look soft.
+Re-import a sharper source before exporting again if the original copy is soft.
 
 ### Rolling live sessions
 
-Under **Live now only**, choose **Make clips automatically for a short
-session** instead of taking one sample. A rolling session defaults to
+Under **Live now only**, choose **Make clips automatically for a bounded
+session** instead of taking one sample. **Live session** shows capture status
+and completed clips; use **Review retained moments** to edit an individual clip.
+A rolling session defaults to
 600 seconds (10 minutes) and can request 1–1,800 seconds (up to 30 minutes).
 Windows default to 60 seconds, accept 1–60 seconds, and cannot be longer
 than the session.
@@ -166,7 +202,7 @@ than the session.
   manual correction without an automatic export. A session crop affects
   future windows only. This is not continuous identity tracking or
   guaranteed duplicate detection; review each export.
-- **Stop session** preserves completed clips and drops incomplete work.
+- **Stop capture** preserves completed clips and drops incomplete work.
   Stopped, failed, or interrupted rolling sessions cannot resume. Completed
   clips with retained source windows can be corrected and re-exported,
   even after stopping or reopening the app. A re-export creates a new file.
@@ -182,18 +218,26 @@ than the session.
 
 ### Source formats and limits
 
-Remote ingest is limited to public, **unencrypted, multiplexed MPEG-TS
-HLS** (video and audio together). Public availability alone doesn't
+Live and selective remote ingest require public, **unencrypted, multiplexed
+MPEG-TS HLS** (video and audio together). Public availability alone doesn't
 guarantee a compatible rendition. Encrypted streams, separate HLS audio,
 discontinuities, and private or protected videos are unsupported.
 
-**YouTube finished-video support is limited.** The video must be public and
-finished, with a compatible HLS rendition and a complete, verified timeline.
-StreamFrame fetches only the bounded set of media segments needed for the
-requested range. Most YouTube VOD formats are unsupported: there is no
-DASH, direct MP4, or whole-video fallback. A broadcast marked `post_live`
-is still processing and is explicitly unavailable. Once processing finishes,
-the video still needs to offer a compatible rendition and timeline.
+**Short YouTube videos:** Paste a finished-video link and select **Full video**
+to import up to five minutes. StreamFrame tries compatible MP4 or WebM picture
+and audio tracks, combined MP4, and supported HLS.
+For whole-track requests the CDN rejects, StreamFrame can retrieve and verify
+consecutive byte ranges under the same transfer and time limits. If you run
+outside the WSL launcher, refresh the environment from `requirements.lock`
+and reinstall the editable package after updating StreamFrame.
+YouTube VOD imports require verified 720p or better; there is no
+lower-resolution fallback. They use the original English audio when YouTube
+identifies it and never substitute a dubbed track. Rolling sessions also hold clips below 720p for
+manual review and export instead of publishing them automatically.
+A range that matches the full duration also
+works for these short videos. Partial ranges still require a compatible HLS
+archive; StreamFrame fetches only the segments it needs. DASH manifest imports and broadcasts
+still processing (`post_live`) are unsupported.
 
 For channel lookup, Auto falls back only when the live probe establishes
 that the channel is not live, not when metadata access fails. Latest
@@ -252,7 +296,7 @@ run without external yt-dlp configuration or browser cookies.
   override the lock to work around provider changes. Preserve the data
   directory and model cache unless intentionally removing them.
 - **Delete a job:** Stop the job if active and wait for any active or queued
-  exports to finish. Use **Delete** beside that job in **Source library** and
+  exports to finish. Use **More → Delete** beside that job in **Sources** and
   confirm. It removes the job's StreamFrame-owned copies, retained windows
   and exports, not the original file or any export saved separately. If
   deletion is incomplete, fix the reported issue and retry **Delete**.
