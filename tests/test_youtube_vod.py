@@ -93,7 +93,7 @@ class FixtureFetch:
 @pytest.fixture
 def extraction(monkeypatch):
     event = threading.Event()
-    fetch = FixtureFetch(event, 12345)
+    fetch = FixtureFetch(event, time.monotonic() + 120)
 
     def remote_fetch(*_args, validate_url):
         fetch.validate_url = validate_url
@@ -111,7 +111,7 @@ def test_selective_import_reads_only_overlapping_segments_and_trims_local_fd(ext
     def trim(fd, directory, start, end, cancel, **options):
         assert os.read(fd, 1000) == TS * 2
         assert (start, end) == (1, 7)
-        assert cancel is event and options == {"deadline": 12345, "staged": True}
+        assert cancel is event and options == {"deadline": fetch.deadline, "staged": True}
         return "output.mp4"
 
     with patch.object(jobs, "trim_media", side_effect=trim):
