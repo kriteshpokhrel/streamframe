@@ -69,15 +69,15 @@ ROLLING_WORK = ".rolling-work"
 ROLLING_EXPORTS = "rolling-exports"
 ROLLING_SOURCES = "rolling-sources"
 ROLLING_EDITS = ".rolling-edits"
-CANDIDATE_FIELDS = {"id", "start", "end", "score", "evidence", "words", "face_crop", "content_crop"}
+CANDIDATE_FIELDS = {"id", "start", "end", "score", "evidence", "words", "face_crop", "content_crop", "opening_title"}
 DIAGNOSTIC_HISTORY_LIMIT = 24
 DIAGNOSTIC_STAGES = {"queued", "import", "trim", "resolve", "download", "capture", "rolling",
                      "analysis", "export", "completed", "failed", "cancelled", "interrupted"}
 DIAGNOSTIC_STATUSES = {"queued", "running", "exporting", "cancelling", "succeeded", "failed",
                        "cancelled", "interrupted"}
 DIAGNOSTIC_ERRORS = {
-    "YouTubeVodUnavailable": ("This YouTube archive does not offer a verified, supported "
-                              "bounded HLS range or is still processing."),
+    "YouTubeVodUnavailable": ("The YouTube video could not be retrieved in a supported format "
+                              "or is still processing."),
     "SourceResolutionError": "The public source could not be resolved.",
     "LiveCaptureError": "The live source could not be captured.",
     "LiveBackpressureError": "Live capture could not keep up with processing.",
@@ -176,6 +176,10 @@ def video_page(url):
 
 
 class Cancelled(Exception):
+    pass
+
+
+class RemoteForbidden(ValueError):
     pass
 
 
@@ -366,30 +370,21 @@ def analyze_media(path, progress, cancelled, *, cache_transcription=True):
     box = facecam.get("box")
     crop = None
     width, height = media.get("width"), media.get("height")
-    if box and width and height:
-        if facecam.get("framing") in {"webcam_boundary", "face_fallback"}:
-            x, y, w, h = (box[key] for key in ("x", "y", "width", "height"))
-            if min(x, y) >= 0 and min(w, h) > 0 and x + w <= width and y + h <= height:
-                crop = {"x": x / width, "y": y / height,
-                        "width": w / width, "height": h / height}
-        else:
-            crop = padded_face_crop(box, width, height)
+    if box and width and height and facecam.get("framing") == "webcam_boundary":
+        x, y, w, h = (box[key] for key in ("x", "y", "width", "height"))
+        if min(x, y) >= 0 and min(w, h) > 0 and x + w <= width and y + h <= height:
+            crop = {"x": x / width, "y": y / height,
+                    "width": w / width, "height": h / height}
     candidates = []
     for item in result["candidates"]:
         evidence = item.get("evidence", {})
         if isinstance(evidence, dict):
             evidence = [f"{key}: {value:.3f}" for key, value in evidence.items()
                         if finite_number(value)]
-        if crop is None and box:
-            evidence.append("Detected face cannot fit the output panel; set the face crop manually.")
-        elif crop is None:
-            evidence.append("Facecam not confidently detected; set the face crop manually.")
-        elif facecam.get("framing") == "face_fallback":
-            evidence.append("Webcam boundary uncertain; a roomy face-based crop is suggested. Verify or set the face crop manually.")
-        elif facecam.get("framing") == "webcam_boundary":
-            evidence.append("Webcam boundary is estimated; verify the face crop and streamer identity.")
+        if crop is None:
+            evidence.append("No reliable webcam boundary; set the webcam crop manually.")
         else:
-            evidence.append("Detected face may not be the streamer; verify the face crop.")
+            evidence.append("Webcam boundary is estimated; verify the webcam crop and streamer identity.")
         candidates.append(dict(
             id=uuid.uuid4().hex, start=item["start"], end=item["end"],
             score=item.get("score", 0), evidence=evidence,
@@ -404,11 +399,13 @@ def analyze_media(path, progress, cancelled, *, cache_transcription=True):
     }
 
 
-def render_candidate(path, candidate, output_path, progress, cancelled, *, max_output_bytes=None):
+def render_candidate(path, candidate, output_path, progress, cancelled, *, max_output_bytes=None,
+                     brand_dir=None):
     module = importlib.import_module("streamframe.render")
     return module.render_candidate(
         str(path), candidate, str(output_path), progress=progress, cancelled=cancelled,
         max_output_bytes=max_output_bytes,
+        brand_dir=brand_dir,
     )
 
 
@@ -416,23 +413,6 @@ def finite_number(value):
     if type(value) is int:
         return abs(value).bit_length() <= 1023
     return type(value) is float and math.isfinite(value)
-
-
-def padded_face_crop(box, width, height):
-    x, y, w, h = (box[key] for key in ("x", "y", "width", "height"))
-    if min(x, y) < 0 or min(w, h) <= 0 or x + w > width or y + h > height:
-        return None
-    ratio = 9 / 8
-    needed = max(h, w / ratio)
-    available = min(height, width / ratio)
-    if needed > available:
-        return None
-    crop_h = min(available, needed * 1.30)
-    crop_w = crop_h * ratio
-    crop_x = max(0, min(width - crop_w, x + (w - crop_w) / 2))
-    crop_y = max(0, min(height - crop_h, y + (h - crop_h) / 2))
-    return {"x": crop_x / width, "y": crop_y / height,
-            "width": crop_w / width, "height": crop_h / height}
 
 
 def source_range(source):
@@ -455,9 +435,15 @@ def validate_remote_source(source):
     allowed = {"type", "mode", "duration", "start", "end", "rolling",
                "session_duration", "window_duration"}
     remote_url = source["type"] == "url"
-    allowed |= {"url"} if remote_url else {"identifier", "platform"}
+    allowed |= {"url", "full_video", "require_hd"} if remote_url else {"identifier", "platform"}
     if set(source) - allowed:
         raise ValueError("Invalid remote source fields")
+    if "full_video" in source and (source["full_video"] is not True
+            or set(source) - {"require_hd"} != {"type", "url", "full_video"}):
+        raise ValueError("Full video cannot be combined with a range or capture options")
+    if "require_hd" in source and (type(source["require_hd"]) is not bool
+                                  or source.get("full_video") is not True):
+        raise ValueError("require_hd must be a boolean on an explicit full_video YouTube import")
     mode = source.get("mode", "auto")
     if mode not in ("auto", "live", "latest"):
         raise ValueError("Source mode must be auto, live, or latest")
@@ -491,8 +477,10 @@ def validate_remote_source(source):
         if not isinstance(url, str):
             raise ValueError("A public Twitch or YouTube HTTPS URL is required")
         try:
-            _, canonical = video_page(url)
+            platform, canonical = video_page(url)
         except ValueError:
+            if source.get("full_video"):
+                raise ValueError("Full video requires a finished YouTube video link") from None
             parsed = urlsplit(url)
             twitch = parsed.netloc in {"www.twitch.tv", "twitch.tv", "m.twitch.tv"}
             youtube = parsed.netloc in {"www.youtube.com", "youtube.com", "m.youtube.com"}
@@ -502,6 +490,10 @@ def validate_remote_source(source):
                     or len(url) > 4096 or any(ord(c) <= 32 for c in url)):
                 raise ValueError("Use a public HTTPS Twitch or YouTube video or channel URL")
         else:
+            if source.get("full_video"):
+                if platform != "youtube":
+                    raise ValueError("Full video is available for YouTube video links only")
+                return {**source, "url": canonical}
             if mode != "live" and not explicit_range and "mode" not in source:
                 raise ValueError("Finished video URLs require explicit start and end")
             return {**source, "url": canonical, **source_range(source)}
@@ -575,23 +567,31 @@ def wait_process(command, event, deadline, *, output=None, size_limit=None, **op
         stop_process(process)
 
 
-def trim_media(fd, directory, start, end, event, *, deadline=None, staged=False):
+def trim_media(fd, directory, start, end, event, *, deadline=None, staged=False, audio_fd=None,
+               require_hd=False, video_webm=False, audio_webm=False):
     partial = directory / ".trim.mp4"
     target = directory / "source.mp4"
     if event.is_set():
         raise Cancelled()
     ffmpeg = os.environ.get("STREAMFRAME_FFMPEG_PATH", os.environ.get("STREAMFRAME_FFMPEG", "ffmpeg"))
+    local_mov_options = ["-enable_drefs", "0", "-use_absolute_path", "0"]
+    webm_options = ["-f", "matroska"]
     command = [
         ffmpeg, "-nostdin", "-v", "error", "-n",
         "-protocol_whitelist", "fd", "-format_whitelist", "mpegts" if staged else TRIM_FORMATS,
-        *(["-f", "mpegts"] if staged else ["-enable_drefs", "0", "-use_absolute_path", "0"]),
+        *(["-f", "mpegts"] if staged else webm_options if video_webm else local_mov_options),
         *([] if staged else ["-ss", f"{start:.6f}"]),
         "-fd", str(fd), "-i", "fd:",
+        *([] if audio_fd is None else [
+            "-protocol_whitelist", "fd", "-format_whitelist", "mov,matroska,webm",
+            *(webm_options if audio_webm else local_mov_options), "-ss", f"{start:.6f}",
+            "-fd", str(audio_fd), "-i", "fd:",
+        ]),
         *(["-ss", f"{start:.6f}"] if staged else []),
-        "-t", f"{end - start:.6f}", "-map", "0:V:0", "-map", "0:a:0?",
+        "-t", f"{end - start:.6f}", "-map", "0:V:0", "-map", "0:a:0?" if audio_fd is None else "1:a:0",
         "-map_metadata", "-1", "-map_chapters", "-1",
-        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
-        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "17" if require_hd or audio_fd is not None else "23", "-pix_fmt", "yuv420p",
+        "-vf", "crop=trunc(iw/2)*2:trunc(ih/2)*2" if require_hd else "pad=ceil(iw/2)*2:ceil(ih/2)*2",
         "-c:a", "aac", "-movflags", "+faststart",
         "-abort_on", "empty_output_stream", "-fs", str(MAX_MEDIA_BYTES),
         str(partial),
@@ -601,13 +601,26 @@ def trim_media(fd, directory, start, end, event, *, deadline=None, staged=False)
         env = {key: value for key, value in os.environ.items() if not key.lower().endswith("_proxy")}
         code = wait_process(
             command, event, deadline or time.monotonic() + MAX_TRIM_SECONDS,
-            output=partial, size_limit=MAX_MEDIA_BYTES, pass_fds=(fd,),
+            output=partial, size_limit=MAX_MEDIA_BYTES, pass_fds=(fd,) if audio_fd is None else (fd, audio_fd),
             stdout=subprocess.DEVNULL, env=env,
         )
         if code:
             raise ValueError("FFmpeg could not trim this media range (seekable input and libx264 required)")
         if not partial.is_file() or not 0 < partial.stat().st_size < MAX_MEDIA_BYTES:
             raise ValueError("Trimmed media is empty or exceeds the size limit")
+        if require_hd:
+            from . import live
+            from .youtube_vod import YouTubeVodUnavailable
+
+            probe = os.environ.get("STREAMFRAME_FFPROBE_PATH", os.environ.get("STREAMFRAME_FFPROBE", "ffprobe"))
+            data, write = live._memory_writer(4096, "Unexpected HD dimensions probe output")
+            code = live._run([probe, "-v", "error", "-protocol_whitelist", "file", "-f", "mov",
+                              "-enable_drefs", "0", "-use_absolute_path", "0", "-select_streams", "v:0",
+                              "-show_entries", "stream=width,height", "-of", "csv=p=0", str(partial)],
+                             event, deadline or time.monotonic() + MAX_TRIM_SECONDS, write)
+            dimensions = re.fullmatch(rb"([0-9]+),([0-9]+)\s*", data)
+            if code or not dimensions or min(map(int, dimensions.groups())) < 720:
+                raise YouTubeVodUnavailable("YouTube HD unavailable: downloaded video did not verify at 720p or better")
         partial.replace(target)
         return target
     finally:
@@ -634,7 +647,7 @@ class RemoteFetch:
             raise ValueError("Remote media exceeds the transfer limit")
 
     @contextmanager
-    def open(self, url):
+    def open(self, url, *, byte_range=None):
         for _ in range(6):
             self.check()
             if self.validate_url is not None:
@@ -676,6 +689,8 @@ class RemoteFetch:
                         connection.sock = tls
                         path = (parsed.path or "/") + ("?" + parsed.query if parsed.query else "")
                         headers = {"Accept-Encoding": "identity", "Connection": "close"}
+                        if byte_range is not None:
+                            headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
                         connection.request("GET", path, headers=headers)
                         response = connection.getresponse()
                         try:
@@ -687,7 +702,9 @@ class RemoteFetch:
                                 continue
                             if response.status in {408, 429} or 500 <= response.status <= 599:
                                 raise TransientRemoteError(f"Remote server returned HTTP {response.status}")
-                            if response.status != 200:
+                            if response.status == 403:
+                                raise RemoteForbidden("Remote media is unavailable")
+                            if response.status != (206 if byte_range is not None else 200):
                                 raise ValueError("Remote media is unavailable")
                             if response.getheader("Content-Encoding", "identity") != "identity":
                                 raise ValueError("Compressed remote HTTP responses are unsupported")
@@ -790,8 +807,10 @@ def import_remote(source, directory, event, *, allow_shorter=False, on_resolved=
     platform, url = video_page(source["url"])
     if platform == "youtube":
         from .youtube_vod import import_youtube_vod
-        return import_youtube_vod(url, directory, event, source["start"], source["end"],
-                                  allow_shorter=allow_shorter, on_resolved=on_resolved)
+        return import_youtube_vod(url, directory, event, source.get("start"), source.get("end"),
+                                  allow_shorter=allow_shorter, full_video=source.get("full_video", False),
+                                  require_hd=True,
+                                  on_resolved=on_resolved)
     deadline = time.monotonic() + MAX_DOWNLOAD_SECONDS
     info = resolve_video(platform, url, directory, event, deadline)
     start, end = source["start"], source["end"]
@@ -863,6 +882,9 @@ def validate_candidate(candidate):
     if not isinstance(result["evidence"], list) or not all(isinstance(x, str) for x in result["evidence"]):
         raise ValueError("Evidence must be a list of strings")
     result.setdefault("words", [])
+    if "opening_title" in result and (not isinstance(result["opening_title"], str)
+                                     or len(result["opening_title"]) > 60):
+        raise ValueError("Opening title must be a string of at most 60 characters")
     if not isinstance(result["words"], list) or len(result["words"]) > 100000:
         raise ValueError("Invalid words")
     previous_start = -1.0
@@ -1015,10 +1037,19 @@ def _rolling_encode(raw, media, duration, event, maximum):
     probe = os.environ.get("STREAMFRAME_FFPROBE_PATH", os.environ.get("STREAMFRAME_FFPROBE", "ffprobe"))
     data, write = live._memory_writer(4096, "Unexpected live window duration probe output")
     if live._run([probe, "-v", "error", "-protocol_whitelist", "file", "-f", "mov", "-enable_drefs", "0",
-                  "-use_absolute_path", "0", "-show_entries", "format=duration",
+                  "-use_absolute_path", "0", "-select_streams", "v:0",
+                  "-show_entries", "format=duration:stream=width,height",
                   "-of", "json", str(media)], event, deadline, write):
-        raise ValueError("Could not verify encoded live window duration")
-    return float(json.loads(data)["format"]["duration"])
+        raise ValueError("Could not verify encoded live window duration and dimensions")
+    try:
+        info = json.loads(data)
+        actual = float(info["format"]["duration"])
+        width, height = (info["streams"][0][key] for key in ("width", "height"))
+        if type(width) is not int or type(height) is not int or min(width, height) <= 0:
+            raise ValueError()
+    except (KeyError, IndexError, TypeError, ValueError):
+        raise ValueError("Live window has no verifiable video dimensions or duration") from None
+    return actual, width, height
 
 
 def _rolling_process(args, event, stage, *, data=None, env=None, committed=None):
@@ -1079,7 +1110,10 @@ def _rolling_render_overhead(candidate):
     from . import render
 
     subtitles = render._words(candidate["words"], candidate["start"], candidate["end"])
-    return len(ROLLING_FONTS) + (len(render._ass(subtitles).encode("utf-8")) if subtitles else 0)
+    title = candidate.get("opening_title", "")
+    duration = candidate["end"] - candidate["start"]
+    return len(ROLLING_FONTS) + (len(render._ass(subtitles, title, duration).encode("utf-8"))
+                                 if subtitles or title.strip() else 0)
 
 
 def _rolling_render(media, candidate, output, event, quota, maximum=None):
@@ -1259,7 +1293,27 @@ class JobStore:
 
     def get(self, job_id):
         with self.lock, self.connect() as db:
-            return self._get(db, job_id)
+            job = self._get(db, job_id)
+        return self._export_dates(job)
+
+    def _export_dates(self, job):
+        directory = self.root / job["id"]
+        if "live_session" in job:
+            directory /= ROLLING_EXPORTS
+        if directory.is_symlink() or not directory.resolve().is_relative_to(self.root):
+            return job
+        for record in job.get("exports", []):
+            filename = record.get("filename", "")
+            if record.get("created_at") or not re.fullmatch(r"[a-f0-9]{32}\.mp4", filename):
+                continue
+            try:
+                details = (directory / filename).lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(details.st_mode):
+                record["created_at"] = datetime.fromtimestamp(details.st_mtime, timezone.utc).isoformat()
+                record["date_from_file"] = True
+        return job
 
     def diagnostics(self, job_id):
         job = self.get(job_id)
@@ -1284,6 +1338,8 @@ class JobStore:
         mode = mode if mode in {"auto", "live", "latest", "local"} else "unknown"
         if source_type == "url" and "start" in source and "mode" not in source:
             mode = "bounded VOD range"
+        elif source.get("full_video"):
+            mode = "full short video"
         selection = resolved.get("selection")
         selection = selection if selection in {"live", "latest", "video"} else "unknown"
         raw_chain = job.get("diagnostic_error_chain")
@@ -1363,8 +1419,9 @@ class JobStore:
 
     def list(self):
         with self.lock, self.connect() as db:
-            return sorted((json.loads(row[0]) for row in db.execute("SELECT data FROM jobs")),
+            jobs = sorted((json.loads(row[0]) for row in db.execute("SELECT data FROM jobs")),
                           key=lambda job: job["created_at"], reverse=True)
+        return [self._export_dates(job) for job in jobs]
 
     def update(self, job_id, **values):
         with self.lock, self.connect() as db:
@@ -1375,7 +1432,7 @@ class JobStore:
             self._save(db, job)
             return job
 
-    def create(self, source):
+    def create(self, source, auto_export=None):
         if not isinstance(source, dict) or source.get("type") not in ("file", "url", "streamer"):
             raise ValueError("source requires type=file, url, or streamer")
         if source["type"] == "file":
@@ -1391,6 +1448,14 @@ class JobStore:
             source = {"type": "file", "path": str(path), **bounds}
         else:
             source = validate_remote_source(source)
+        if auto_export is not None:
+            if not isinstance(auto_export, dict) or set(auto_export) - {"title"}:
+                raise ValueError("Auto-export settings may only include title")
+            title = auto_export.get("title")
+            if title is not None and (not isinstance(title, str) or len(title) > 60):
+                raise ValueError("Auto-export title must be null or a string of up to 60 characters")
+            if source.get("rolling"):
+                raise ValueError("Auto-export of the best moments is not available for rolling capture")
         with self.lock:
             if self.closed:
                 raise Conflict("Job runner is stopped")
@@ -1403,6 +1468,8 @@ class JobStore:
                        candidates=[], exports=[], media_url=None, error=None,
                        operation="analyze", export_candidate_id=None,
                        created_at=time.time(), updated_at=time.time())
+            if auto_export is not None:
+                job["auto_export"] = auto_export
             if source.get("rolling"):
                 job["operation"] = "rolling"
                 job["live_session"] = dict(phase="queued", acquiring=False, windows_seen=0,
@@ -1467,13 +1534,14 @@ class JobStore:
                     os.close(fd)
             return target
         source = job["source"]
-        if source["type"] == "url" and "start" in source and "mode" not in source:
-            self.update(job["id"], stage="download", message="Fetching the selected video range")
+        if source["type"] == "url" and ("start" in source or source.get("full_video")) and "mode" not in source:
+            message = "Fetching the full video" if source.get("full_video") else "Fetching the selected video range"
+            self.update(job["id"], stage="download", message=message)
             platform, _ = video_page(source["url"])
             return import_remote(source, directory, event, on_resolved=lambda title, end: self.update(
                 job["id"], resolved_source={"url": source["url"], "platform": platform, "title": title,
                                             "is_live": False, "selection": "video"},
-                imported_range={"start": source["start"], "end": end},
+                imported_range={"start": source.get("start", 0), "end": end},
             ))
         previous = job.get("resolved_source")
         if previous and not previous["is_live"] and "imported_range" in job:
@@ -1536,7 +1604,7 @@ class JobStore:
                     live["windows"][index] = window
                 live["windows_seen"] = len(live["windows"])
                 live["global_time"] = max(live["global_time"], window["end"])
-                live["windows_processed"] = sum(w["status"] in {"exported", "no_face", "no_candidate",
+                live["windows_processed"] = sum(w["status"] in {"exported", "no_face", "low_quality", "no_candidate",
                                                                 "duplicate"}
                                                 for w in live["windows"])
                 if window.get("warning") and window["warning"] not in live["warnings"]:
@@ -1598,7 +1666,7 @@ class JobStore:
                 return
             duration = window["end"] - window["start"]
             maximum = quota.reserve(ROLLING_ENCODE_BYTES)
-            actual = _rolling_encode(raw, media, duration, event, maximum)
+            actual, width, height = _rolling_encode(raw, media, duration, event, maximum)
             size = media.stat().st_size
             if (not finite_number(actual) or not 0 < actual <= duration + 1e-6
                     or media.is_symlink() or not media.is_file() or not 0 < size <= maximum):
@@ -1606,6 +1674,7 @@ class JobStore:
             raw.unlink()
             quota.reduce(maximum - size)
             window["media_end"] = window["start"] + actual
+            window.update(source_width=width, source_height=height)
             if duration - actual > 1e-6:
                 warning = (f"Window {index}: encoder validated only {actual:.3f}s of {duration:.3f}s; "
                            "the tail is not included in analysis or export.")
@@ -1647,6 +1716,13 @@ class JobStore:
             if live_state["face_crop"] is not None:
                 candidate["face_crop"] = live_state["face_crop"]
                 candidate["evidence"].append("Manual live-session face crop used.")
+            if min(width, height) < 720:
+                window.update(status="low_quality", warning=f"{warning + ' ' if warning else ''}"
+                              f"Window {index}: source is {width}x{height}; automatic publication "
+                              "requires at least 720p. Retained for manual review and export.")
+                retain_source(candidate)
+                self._live_update(job_id, window=window, candidate=candidate, source_words=source_words)
+                return
             if candidate["face_crop"] is None:
                 window.update(status="no_face", warning=f"{warning + ' ' if warning else ''}"
                               f"Window {index}: no face crop; edit this clip or set a crop for future windows.")
@@ -1856,6 +1932,44 @@ class JobStore:
                               status="failed", stage="failed", error=f"{type(exc).__name__}: {exc}"[:2000],
                               diagnostic_error_chain=_diagnostic_error(exc))
 
+    def _render_export(self, job_id, media, candidate, progress, event, *, remaining=None):
+        filename = uuid.uuid4().hex + ".mp4"
+        output = self.root / job_id / filename
+        brand_dir = self.root / "lobby-crew"
+        published = False
+        try:
+            if self.renderer is render_candidate and brand_dir.is_dir():
+                self.renderer(media, candidate, output, progress, event, brand_dir=brand_dir)
+            else:
+                self.renderer(media, candidate, output, progress, event)
+            with self.lock:
+                if event.is_set():
+                    raise Cancelled()
+                if output.is_symlink() or not output.is_file() or output.stat().st_size == 0:
+                    raise ValueError("Renderer did not produce an export")
+                record = dict(candidate_id=candidate["id"], filename=filename,
+                              created_at=datetime.now(timezone.utc).isoformat(),
+                              start=candidate["start"], end=candidate["end"],
+                              url=f"/api/jobs/{job_id}/exports/{filename}")
+                changes = {"auto_export_pending": remaining, "export_candidate_id": None} if remaining is not None else {}
+                self.update(job_id, exports=self.get(job_id)["exports"] + [record], **changes)
+                published = True
+        finally:
+            if not published:
+                output.unlink(missing_ok=True)
+
+    def _run_auto_exports(self, job, media, progress, event):
+        pending = job["auto_export_pending"]
+        candidates = {candidate["id"]: candidate for candidate in job["candidates"]}
+        for index, candidate_id in enumerate(pending):
+            with self.lock:
+                if event.is_set():
+                    raise Cancelled()
+                self.update(job["id"], status="exporting", stage="export", progress=0,
+                            export_candidate_id=candidate_id)
+            self._render_export(job["id"], media, candidates[candidate_id], progress, event,
+                                remaining=pending[index + 1:])
+
     def _run(self, job_id, event, candidate):
         progress = lambda value, message="": self._progress(job_id, event, value, message)
         try:
@@ -1869,16 +1983,9 @@ class JobStore:
             if candidate is not None:
                 if media is None:
                     raise ValueError("Preview media is unavailable")
-                filename = uuid.uuid4().hex + ".mp4"
-                output = self.root / job_id / filename
-                self.renderer(media, candidate, output, progress, event)
-                if event.is_set():
-                    raise Cancelled()
-                if output.is_symlink() or not output.is_file() or output.stat().st_size == 0:
-                    raise ValueError("Renderer did not produce an export")
-                exports = job["exports"] + [dict(candidate_id=candidate["id"], filename=filename,
-                                                url=f"/api/jobs/{job_id}/exports/{filename}")]
-                self.update(job_id, exports=exports)
+                self._render_export(job_id, media, candidate, progress, event)
+            elif "auto_export_pending" in job and media is not None:
+                self._run_auto_exports(job, media, progress, event)
             else:
                 if media is None:
                     for path in (self.root / job_id).glob("source.*"):
@@ -1910,7 +2017,25 @@ class JobStore:
                         db.execute("DELETE FROM transcripts WHERE job_id=?", (job_id,))
                     current = self._get(db, job_id)
                     current["candidates"] = candidates
+                    if "auto_export" in current:
+                        requested_title = current["auto_export"].get("title", "")
+                        omit_title = requested_title is None
+                        title = "" if omit_title else (
+                            requested_title.strip()
+                            or ((current.get("resolved_source") or {}).get("title") or "").strip()
+                            or (Path(current["source"]["path"]).stem if current["source"]["type"] == "file" else "")
+                        )
+                        ranked = sorted(candidates, key=lambda item: item.get("score", 0), reverse=True)[:2]
+                        eligible = [item for item in ranked if item.get("face_crop") is not None and (omit_title or title)]
+                        for item in eligible:
+                            item["opening_title"] = title[:60].rstrip()
+                        current["auto_export_pending"] = [item["id"] for item in eligible]
+                        if len(eligible) < 2:
+                            current["auto_export_notice"] = ("Auto-export needs a title. Open a moment to add one."
+                                                             if not omit_title and not title else "Fewer than two ranked moments had usable webcam framing. Review the remaining moments manually.")
                     self._save(db, current)
+                if "auto_export_pending" in current:
+                    self._run_auto_exports(current, media, progress, event)
             with self.lock:
                 if event.is_set():
                     raise Cancelled()
@@ -1938,6 +2063,55 @@ class JobStore:
                 self.active[job_id][0].set()
                 return self.update(job_id, status="cancelling")
             return job
+
+    def delete_export(self, job_id, filename):
+        if not re.fullmatch(r"[a-f0-9]{32}", job_id) or not re.fullmatch(r"[a-f0-9]{32}\.mp4", filename):
+            raise KeyError(filename)
+        with self.lock:
+            if self.closed:
+                raise Conflict("Job runner is stopped")
+            try:
+                with self.connect() as db:
+                    db.execute("PRAGMA synchronous=FULL")
+                    job = self._get(db, job_id)
+                    if (job_id in self.active or any(owner == job_id for owner, _ in self.corrections)
+                            or job["status"] in {"queued", "running", "cancelling", "exporting"}):
+                        raise Conflict("Wait for this source to finish processing before deleting an export")
+                    remaining = [item for item in job["exports"] if item["filename"] != filename]
+                    if len(remaining) == len(job["exports"]):
+                        raise KeyError(filename)
+                    self._remove_export_file(job_id, filename, rolling="live_session" in job)
+                    job["exports"] = remaining
+                    self._save(db, job)
+            except (OSError, sqlite3.Error) as exc:
+                raise DeletionFailed("Could not complete export deletion; try again") from exc
+
+    def delete_exports(self, job_id):
+        with self.lock:
+            job = self.get(job_id)
+            for record in job["exports"]:
+                self.delete_export(job_id, record["filename"])
+
+    def _remove_export_file(self, job_id, filename, *, rolling):
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root = os.open(self.root, flags)
+        opened = [root]
+        try:
+            if not os.path.samestat(self.root_identity, os.fstat(root)):
+                raise OSError("Job storage directory changed")
+            for name in (job_id, ROLLING_EXPORTS) if rolling else (job_id,):
+                opened.append(os.open(name, flags, dir_fd=opened[-1]))
+            directory = opened[-1]
+            try:
+                os.unlink(filename, dir_fd=directory)
+            except FileNotFoundError:
+                pass  # A previous attempt can unlink the file before the record is saved.
+            os.fsync(directory)
+        except FileNotFoundError:
+            pass
+        finally:
+            for fd in reversed(opened):
+                os.close(fd)
 
     def delete(self, job_id):
         if not re.fullmatch(r"[a-f0-9]{32}", job_id):
@@ -2062,6 +2236,9 @@ class JobStore:
                             edited["words"].sort(key=lambda word: (word["start"], word["end"]))
                             edited = validate_candidate(edited)
                     job["candidates"][index] = edited
+                    if "face_crop" in patch:
+                        for item in job["candidates"]:
+                            item["face_crop"] = edited["face_crop"]
                     return self.update(job_id, candidates=job["candidates"])
             raise KeyError(candidate_id)
 
@@ -2076,6 +2253,8 @@ class JobStore:
             candidate = next((c for c in job["candidates"] if c["id"] == candidate_id), None)
             if candidate is None:
                 raise KeyError(candidate_id)
+            if candidate["face_crop"] is None:
+                raise ValueError("Set the webcam crop before exporting.")
             self.update(job_id, status="queued", stage="export", error=None, progress=0,
                         operation="export", export_candidate_id=candidate_id)
             self._start(job_id, candidate)

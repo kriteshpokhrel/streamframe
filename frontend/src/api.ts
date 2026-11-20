@@ -2,6 +2,19 @@ import type { CandidateChanges, ExportedVideo, ExportFile, Job, JobExport } from
 
 export const jobPath = (id: string) => `/api/jobs/${encodeURIComponent(id)}`;
 
+export function parseSourceTime(value: string): number {
+  const text = value.trim();
+  if (/^\d+(?:\.\d+)?$/.test(text)) return Number(text);
+  const parts = text.split(':');
+  if (parts.length !== 2 && parts.length !== 3) return NaN;
+  if (!/^\d+$/.test(parts[0]) || !/^\d{1,2}(?:\.\d+)?$/.test(parts[parts.length - 1])) return NaN;
+  if (parts.length === 3 && !/^\d{1,2}$/.test(parts[1])) return NaN;
+  const seconds = Number(parts[parts.length - 1]);
+  const minutes = Number(parts[parts.length - 2]);
+  if (seconds >= 60 || (parts.length === 3 && minutes >= 60)) return NaN;
+  return (parts.length === 3 ? Number(parts[0]) * 3600 : 0) + minutes * 60 + seconds;
+}
+
 export function streamerSource(value: string, platform: 'twitch' | 'youtube',
   mode: 'auto' | 'live' | 'latest', duration: number) {
   const identifier = value.trim();
@@ -74,10 +87,11 @@ export function jobControls(job: Job) {
 
 export function failedSourceStatus(job: Job): string {
   const error = describe(job.error);
+  if (/youtube hd unavailable|no sd fallback was used/i.test(error)) return 'HD unavailable';
   if (/post[_ -]live|post[_ -]processing|still processing/i.test(error)) {
     return 'YouTube post-live processing unavailable — see job error';
   }
-  if (/unsupported|not supported|not implemented|bounded.{0,100}(?:unavailable|not available)/i.test(error)) {
+  if (/unsupported|not supported|no supported|not implemented|bounded.{0,100}(?:unavailable|not available)/i.test(error)) {
     return 'Source acquisition unsupported — see job error';
   }
   if (/source resolution failed|SourceResolutionError/i.test(error)) return 'Resolution failed — source not confirmed';

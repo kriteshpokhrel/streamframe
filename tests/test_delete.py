@@ -9,7 +9,8 @@ from streamframe.server import create_app
 
 
 LOCAL = "http://127.0.0.1"
-CANDIDATE = {"id": "clip", "start": 0.1, "end": 0.8}
+CANDIDATE = {"id": "clip", "start": 0.1, "end": 0.8,
+             "face_crop": {"x": 0.1, "y": 0.1, "width": 0.4, "height": 0.4}}
 
 
 def analyze(*_):
@@ -76,6 +77,66 @@ def test_delete_removes_only_selected_job_and_generated_media(library):
         assert client.get(f"/api/jobs/{other_id}/media").content == original.read_bytes() == b"user original"
         with client.app.state.jobs.connect() as db:
             assert [row["job_id"] for row in db.execute("SELECT job_id FROM transcripts")] == [other_id]
+
+
+def test_delete_export_preserves_original_source_and_other_exports(library):
+    root, original, app = library
+    with TestClient(app(), base_url=LOCAL, client=("127.0.0.1", 30000)) as client:
+        job_id, worker = launch(client, original)
+        join(worker)
+        for _ in range(2):
+            _, worker = launch(client, original, job_id)
+            join(worker)
+        url = f"/api/jobs/{job_id}"
+        first, second = client.get(url).json()["exports"]
+        assert first["created_at"] and first["start"] == CANDIDATE["start"]
+        assert client.delete(first["url"], headers={"Origin": "https://not-local.example"}).status_code == 403
+        assert client.delete(first["url"]).status_code == 204
+        assert client.delete(first["url"]).status_code == 404
+        assert client.get(first["url"]).status_code == 404
+        assert not (root / job_id / first["filename"]).exists()
+        assert client.get(second["url"]).content == b"generated export"
+        assert client.get(url + "/media").content == original.read_bytes() == b"user original"
+        job = client.get(url).json()
+        assert job["exports"] == [second]
+        assert job["candidates"][0]["id"] == CANDIDATE["id"]
+        assert client.delete(url + "/exports").status_code == 204
+        assert client.get(second["url"]).status_code == 404
+        assert client.get(url).json()["exports"] == []
+        assert client.get(url).json()["candidates"] == job["candidates"]
+        assert client.get(url + "/media").content == b"user original"
+
+
+@pytest.mark.parametrize(("settings", "expected_title"), [
+    ({}, "input"),
+    ({"title": ""}, "input"),
+    ({"title": "  Custom hook  "}, "Custom hook"),
+    ({"title": None}, ""),
+])
+def test_auto_export_ranks_two_and_applies_opening_title(library, settings, expected_title):
+    _, original, app = library
+    rendered = []
+
+    def analyzer(*_):
+        return [{**CANDIDATE, "id": name, "score": score}
+                for name, score in (("low", .2), ("best", .9), ("next", .7))]
+
+    def renderer(path, candidate, output, progress, cancelled):
+        rendered.append((candidate["id"], candidate["opening_title"]))
+        render(path, candidate, output, progress, cancelled)
+
+    with TestClient(app(analyzer, renderer), base_url=LOCAL, client=("127.0.0.1", 30000)) as client:
+        store = client.app.state.jobs
+        with store.lock:
+            job_id = store.create({"type": "file", "path": str(original)}, settings)["id"]
+            worker = store.active[job_id][1]
+        join(worker)
+        job = client.get(f"/api/jobs/{job_id}").json()
+        assert job["status"] == "succeeded", job["error"]
+        assert rendered == [("best", expected_title), ("next", expected_title)]
+        assert [entry["candidate_id"] for entry in job["exports"]] == ["best", "next"]
+        assert job["auto_export_pending"] == []
+        assert "auto_export_notice" not in job
 
 
 def test_unsafe_paths_never_follow_symlinks(library):

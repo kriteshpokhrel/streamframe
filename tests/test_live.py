@@ -92,13 +92,14 @@ def serve(routes):
 
 
 @pytest.fixture
-def media_segments(tmp_path):
+def media_segments(tmp_path, request):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg and ffprobe are required for live media verification")
+    size, rate = getattr(request, "param", ("128x72", 30))
     subprocess.run([
-        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=30",
+        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate={rate}",
         "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000", "-t", "4", "-c:v", "libx264",
-        "-g", "30", "-sc_threshold", "0", "-bf", "0", "-c:a", "aac",
+        "-g", str(rate), "-sc_threshold", "0", "-bf", "0", "-c:a", "aac",
         "-f", "hls", "-hls_time", "1", "-hls_segment_filename", str(tmp_path / "fixture-%d.ts"),
         str(tmp_path / "fixture.m3u8"),
     ], check=True, timeout=15)
@@ -551,6 +552,7 @@ def test_jobstore_live_hls_analyze_and_export(tmp_path, monkeypatch, media_segme
             # Render a real caption in a nonzero source-time window.
             store.edit(job_id, candidate["id"], {
                 "start": 0.4, "end": 1.8,
+                "face_crop": {"x": 0.0, "y": 0.0, "width": 0.4, "height": 0.4},
                 "words": [{"start": 0.6, "end": 1.5, "text": "Local timebase"}],
             })
             store.export(job_id, candidate["id"])

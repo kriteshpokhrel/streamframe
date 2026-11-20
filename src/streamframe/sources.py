@@ -148,8 +148,8 @@ def _metadata(url, *, flat, proxy, cancelled, deadline, budget):
         # fields are needed for validation and Twitch VOD manifest checks.
         command += [
             "--no-playlist", "--print",
-            '{"meta":%(.{id,title,availability,is_private,needs_auth,live_status,is_live,webpage_url,_type,duration,has_drm})j,'
-            '"formats":%(formats.:.{url,vcodec,acodec,protocol,height,has_drm}|[])j}',
+            '{"meta":%(.{id,title,availability,is_private,needs_auth,live_status,is_live,webpage_url,_type,duration,has_drm,language})j,'
+            '"formats":%(formats.:.{url,vcodec,acodec,protocol,height,ext,has_drm,language,language_preference}|[])j}',
         ]
     command += ["--", url]
     # Do not inherit proxy, PYTHONPATH, credential, or yt-dlp environment settings.

@@ -24,16 +24,17 @@ def _edge_maps(frame):
     return across_x(frame), across_x(frame.transpose(1, 0, 2))
 
 
-def frame_rectangles(frame, faces):
+def frame_rectangles(frame, faces, *, strengths=None):
     """Return plausible (score, left/top/right/bottom, face index) candidates.
 
-    The frame must already be unpadded. All four edges need visible support;
-    neither the canvas boundary nor FFmpeg's letterbox counts as evidence.
+    The frame must already be unpadded. A flush overlay may borrow up to two
+    adjacent frame edges, but those edges do not count as visual evidence.
     """
     height, width = frame.shape[:2]
     if min(height, width) < 24 or not faces:
         return []
-    strengths = _edge_maps(frame)
+    if strengths is None:
+        strengths = _edge_maps(frame)
 
     def positions(axis, start, end, lower, upper):
         edges = strengths[axis]
@@ -46,9 +47,9 @@ def frame_rectangles(frame, faces):
         picked = []
         for index in np.argsort(-strength, kind="stable"):
             coord = int(coords[index])
-            if support[index] >= 0.65 and all(abs(coord - previous) > 4 for previous in picked):
+            if support[index] >= 0.5 and all(abs(coord - previous) > 4 for previous in picked):
                 picked.append(coord)
-            if len(picked) == 5:
+            if len(picked) == 7:
                 break
         return picked
 
@@ -60,8 +61,18 @@ def frame_rectangles(frame, faces):
         along = contrast >= _EDGE_THRESHOLD
         middle = len(along) // 2
         coverage = min(float(along[:middle].mean()), float(along[middle:].mean()))
-        strength = float(np.minimum(contrast, 160).mean()) / 160
-        return coverage, 0.6 * coverage + 0.4 * strength
+        inside = float(np.minimum(contrast, 160).mean())
+        # A webcam seam ends at the corners. A long line continuing into
+        # gameplay, or through the webcam background, is weaker evidence.
+        extension = max(6, (end - start) // 4)
+        outside = [
+            float(np.minimum(edges[a:b, line - 1:line + 2].max(axis=1), 160).mean())
+            for a, b in ((max(0, start - extension), max(0, start - 3)),
+                         (min(edges.shape[0], end + 3), min(edges.shape[0], end + extension)))
+            if b - a >= 4
+        ]
+        termination = max(0.0, inside - max(outside, default=inside))
+        return coverage, (0.25 * coverage + 0.35 * inside / 160 + 0.4 * termination / 160)
 
     candidates = []
     for index, (x, y, w, h) in enumerate(faces):
@@ -74,9 +85,20 @@ def frame_rectangles(frame, faces):
         rights = positions(0, y1, y2, x2 + margin_x, x2 + math.ceil(5 * w) + 1)
         tops = positions(1, x1, x2, y1 - math.ceil(5 * h), y1 - margin_y + 1)
         bottoms = positions(1, x1, x2, y2 + margin_y, y2 + math.ceil(5 * h) + 1)
+        # A flush webcam can leave little or no space beyond the face.
+        if x1 <= 5 * w:
+            lefts.append(0)
+        if width - x2 <= 5 * w:
+            rights.append(width)
+        if y1 <= 5 * h:
+            tops.append(0)
+        if height - y2 <= 5 * h:
+            bottoms.append(height)
         side_scores = {}
 
         def side(axis, start, end, line):
+            if line in (0, strengths[axis].shape[1]):
+                return None
             key = (axis, start, end, line)
             if key not in side_scores:
                 side_scores[key] = edge_score(strengths[axis], start, end, line)
@@ -85,32 +107,36 @@ def frame_rectangles(frame, faces):
         for left in lefts:
             for right in rights:
                 rw = right - left
-                if rw < max(14, w * 1.65):
+                if rw < max(14, w * 1.65) or rw == width:
                     continue
                 for top in tops:
                     for bottom in bottoms:
                         rh = bottom - top
-                        if (rh < max(14, h * 1.55) or not 0.45 <= rw / rh <= 2.8
+                        if (rh < max(14, h * 1.55) or rh == height or not 0.45 <= rw / rh <= 2.8
                                 or rw * rh > width * height * 0.65):
                             continue
                         sides = (side(0, top, bottom, left), side(0, top, bottom, right),
                                  side(1, left, right, top), side(1, left, right, bottom))
-                        if all(coverage >= 0.72 for coverage, _ in sides):
-                            score = min(value for _, value in sides)
+                        visible = [edge for edge in sides if edge is not None]
+                        flush = len(visible) < 4
+                        if flush and rw * rh > width * height * 0.33:
+                            continue
+                        if all(coverage >= 0.62 for coverage, _ in visible):
+                            score = sum(value for _, value in visible) / len(visible) - 0.025 * (4 - len(visible))
                             candidates.append((score, (left, top, right, bottom), index))
     return candidates
+
+
+def _close_rectangles(a, b):
+    tolerance = max(3, min(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1]) * 0.06)
+    return all(abs(x - y) <= tolerance for x, y in zip(a, b))
 
 
 def stable_rectangle(observations, decoded_samples):
     """Find a rectangle repeated on distinct frames, or abstain on a close rival."""
     groups = []
-
-    def close(a, b):
-        tolerance = max(3, min(a[2] - a[0], a[3] - a[1], b[2] - b[0], b[3] - b[1]) * 0.06)
-        return all(abs(x - y) <= tolerance for x, y in zip(a, b))
-
     for score, rect, sample, face in sorted(observations, key=lambda item: -item[0]):
-        group = next((g for g in groups if close(g[0], rect)), None)
+        group = next((g for g in groups if _close_rectangles(g[0], rect)), None)
         if group is None:
             group = (rect, {})
             groups.append(group)
@@ -124,7 +150,8 @@ def stable_rectangle(observations, decoded_samples):
     def mean_score(matches):
         return sum(match[0] for match in matches) / len(matches)
 
-    supported.sort(key=lambda matches: (len(matches), mean_score(matches)), reverse=True)
+    supported.sort(key=lambda matches: mean_score(matches) * (0.75 + 0.25 * len(matches) / decoded_samples),
+                   reverse=True)
     best = supported[0]
     if any(len(rival) >= 0.8 * len(best) and mean_score(rival) >= mean_score(best) - 0.06
            for rival in supported[1:]):
@@ -133,16 +160,21 @@ def stable_rectangle(observations, decoded_samples):
     return bounds, [match[2] for match in best]
 
 
-def roomy_face_box(face, width, height):
-    """Estimate head-and-shoulders framing, not a webcam boundary."""
-    x, y, w, h = (face[key] for key in ("x", "y", "width", "height"))
-    # Keep an estimate exportable in the existing 9:8 face panel when possible.
-    # A verified webcam rectangle, unlike an estimate, must not be shrunk to fit.
-    panel_aspect = 9 / 8
-    crop_w = min(2.3 * w, width, height * panel_aspect)
-    crop_h = min(2.5 * h, height, width / panel_aspect)
-    if crop_w < w or crop_h < h:
-        return face
-    left = min(max(0, x + (w - crop_w) / 2), width - crop_w)
-    top = min(max(0, y + h * 0.6 - crop_h / 2), height - crop_h)
-    return {"x": left, "y": top, "width": crop_w, "height": crop_h}
+def temporal_rectangle(frames, seed, observations):
+    """Recover a seam briefly hidden by similar colors outside the overlay."""
+    if len(frames) < 4:
+        return None
+    strengths = tuple(np.median(np.stack(axis), axis=0) for axis in zip(*map(_edge_maps, frames)))
+    admitted = []
+    for score, rect, _ in frame_rectangles(frames[0], [seed], strengths=strengths):
+        support = {sample: face for _, match, sample, face in observations if _close_rectangles(rect, match)}
+        if score >= 0.45 and len(support) >= 2:
+            admitted.append((score, rect, support))
+    admitted.sort(key=lambda hit: hit[0], reverse=True)
+    if not admitted:
+        return None
+    score, rect, support = admitted[0]
+    if any(other_score >= score - 0.06 and not _close_rectangles(rect, other)
+           for other_score, other, _ in admitted[1:]):
+        return None
+    return rect, list(support.values())
