@@ -92,13 +92,14 @@ def serve(routes):
 
 
 @pytest.fixture
-def media_segments(tmp_path):
+def media_segments(tmp_path, request):
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         pytest.skip("FFmpeg and ffprobe are required for live media verification")
+    size, rate = getattr(request, "param", ("128x72", 30))
     subprocess.run([
-        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=30",
+        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=size={size}:rate={rate}",
         "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000", "-t", "4", "-c:v", "libx264",
-        "-g", "30", "-sc_threshold", "0", "-bf", "0", "-c:a", "aac",
+        "-g", str(rate), "-sc_threshold", "0", "-bf", "0", "-c:a", "aac",
         "-f", "hls", "-hls_time", "1", "-hls_segment_filename", str(tmp_path / "fixture-%d.ts"),
         str(tmp_path / "fixture.m3u8"),
     ], check=True, timeout=15)

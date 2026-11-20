@@ -119,8 +119,8 @@ class RealFaceIntegrationTests(unittest.TestCase):
                 probed.append(result)
                 return result
 
-            def capture_ass(captions):
-                result = original_ass(captions)
+            def capture_ass(*args, **kwargs):
+                result = original_ass(*args, **kwargs)
                 generated_ass.append(result)
                 return result
 

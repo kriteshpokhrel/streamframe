@@ -13,6 +13,7 @@ from streamframe import jobs, live, sources
 from test_live import FixtureTransport, media_segments, playlist, segment, serve
 
 
+@pytest.mark.parametrize("media_segments", [("1280x720", 12)], indirect=True)
 def test_rolling_hls_exports_before_stop_and_preserves_clips(tmp_path, monkeypatch, media_segments):
     channel = "https://www.twitch.tv/fixture_channel"
     available = [1]
