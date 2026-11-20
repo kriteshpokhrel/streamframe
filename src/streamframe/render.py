@@ -43,6 +43,24 @@ _INPUT_OPTIONS = [
 ]
 _MOV_OPTIONS = ["-enable_drefs", "0", "-use_absolute_path", "0"]
 
+OUTPUT_WIDTH = 1080
+OUTPUT_HEIGHT = 1920
+# Round to an even scanline for the 4:2:0 output.
+WEBCAM_HEIGHT = 2 * round(OUTPUT_HEIGHT * 0.38 / 2)
+SCREEN_HEIGHT = OUTPUT_HEIGHT - WEBCAM_HEIGHT
+OUTRO_SECONDS = 1.5
+OUTRO_FRAMES = round(OUTRO_SECONDS * 30)
+TITLE_VIOLET = "0x392279"
+TITLE_SECONDS = 2.4
+TITLE_Y = WEBCAM_HEIGHT + 2
+
+
+def _brand_images(directory: Path) -> tuple[Path, Path]:
+    images = directory / "watermark.png", directory / "outro.png"
+    if any(not path.is_file() for path in images):
+        raise RenderError("Lobby Crew branding requires watermark.png and outro.png")
+    return images[0].resolve(), images[1].resolve()
+
 
 def _number(value: Any, label: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -142,7 +160,35 @@ def _ass_time(centiseconds: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{hundredths:02d}"
 
 
-def _ass(words: list[tuple[float, float, str]]) -> str:
+def _branded_title_layout(title: str) -> tuple[list[str], int]:
+    def width(line: str) -> float:
+        return sum(
+            1.05 if ord(c) > 127 or c in "MW@" else
+            0.32 if c in " ilI.,!:;'|" else
+            0.69 if c.isupper() else 0.54
+            for c in line
+        )
+
+    def size(lines: list[str], maximum: int) -> int:
+        return min(maximum, int(630 / max(map(width, lines))))
+
+    if size([title], 58) == 58:
+        return [title], 58
+    breaks = [i for i, c in enumerate(title) if c == " "] or list(range(1, len(title)))
+    pairs = [[title[:i], title[i:].lstrip()] for i in breaks]
+    lines = min(pairs, key=lambda pair: max(map(width, pair)))
+    font_size = size(lines, 58)
+    if font_size < 42 and len(breaks) >= 2:
+        triples = ([title[:i], title[i:j].lstrip(), title[j:].lstrip()]
+                   for index, i in enumerate(breaks) for j in breaks[index + 1:])
+        three = min(triples, key=lambda group: max(map(width, group)))
+        if size(three, 42) > font_size:
+            return three, size(three, 42)
+    return lines, font_size
+
+
+def _ass(words: list[tuple[float, float, str]], title: str = "", duration: float = 0,
+         outro_start: float | None = None) -> str:
     header = """[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
@@ -153,33 +199,126 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,Arial,64,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,100,100,250,1
+Style: Opening,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,5,158,158,0,1
+Style: BrandedTitle,DejaVu Sans,41,&H00FCF4FF,&H00FCF4FF,&H00FCF4FF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
+Style: Social,Arial,47,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,4,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events: list[str] = []
-    # Five words per phrase bounds line length; the highlighted word changes
-    # with its own source timestamps rather than altering the speech.
-    for offset in range(0, len(words), 5):
-        group = words[offset:offset + 5]
-        for i, (start, end, _) in enumerate(group):
-            start_cs = round(start * 100)
-            end_cs = max(start_cs + 1, round(end * 100))
-            parts = [f"{{\\c&H00FFFF&}}{text}{{\\c&HFFFFFF&}}" if i == j else text
-                     for j, (_, _, text) in enumerate(group)]
-            events.append(f"Dialogue: 0,{_ass_time(start_cs)},{_ass_time(end_cs)},Default,,0,0,0,,{' '.join(parts)}")
+    title = _display_text(title)
+    if title and outro_start is not None:
+        end_cs = max(1, round(min(duration, TITLE_SECONDS) * 100))
+        prefix = f"0:00:00.00,{_ass_time(end_cs)},BrandedTitle,,0,0,0,,"
+        card = "m 0 0 l 864 0 864 172 0 172"
+        events.append(rf"Dialogue: 1,{prefix}{{\an7\pos(108,{TITLE_Y - 86})\bord0\1c&H792239&\p1}}{card}")
+        events.append(rf"Dialogue: 2,{prefix}{{\an7\pos(108,{TITLE_Y - 86})\bord0\1c&HDD96B0&\p1}}"
+                      r"m 0 0 l 864 0 864 172 0 172 m 3 3 l 3 169 861 169 861 3")
+        lines, font_size = _branded_title_layout(title)
+        text = r"\N".join(lines)
+        events.append(rf"Dialogue: 3,{prefix}{{\pos(614,{TITLE_Y})\q2\fs{font_size}}}{text}")
+    elif title:
+        end_cs = max(1, round(min(duration, TITLE_SECONDS) * 100))
+        center = WEBCAM_HEIGHT + 5
+        prefix = f"0:00:00.00,{_ass_time(end_cs)},Opening,,0,0,0,,"
+        card = r"m 24 0 l 816 0 b 829 0 840 11 840 24 l 840 148 b 840 161 829 172 816 172 l 24 172 b 11 172 0 161 0 148 l 0 24 b 0 11 11 0 24 0"
+        events.append(rf"Dialogue: 1,{prefix}{{\an7\pos(120,{center - 86})\bord3\1c&H250B17&\1a&H12&\p1}}{card}")
+        longest = max(map(len, title.split()))
+        font_size = min(58, 730 // longest)
+        events.append(rf"Dialogue: 2,{prefix}{{\pos(540,{center})\fs{font_size}}}{title}")
+    offset = 0
+    while offset < len(words):
+        limit = offset + 1
+        while limit < min(len(words), offset + 5) and words[limit][0] - words[limit - 1][1] <= 0.45:
+            limit += 1
+        phrase = [word[2] for word in words[offset:limit]]
+        for i in range(offset, limit):
+            start, end, text = words[i]
+            stop = min(end, words[i + 1][0]) if i + 1 < len(words) else end
+            begin_cs = math.ceil(start * 100 - 1e-8)
+            stop_cs = math.floor(stop * 100 + 1e-8)
+            if stop_cs > begin_cs:
+                parts = phrase.copy()
+                parts[i - offset] = rf"{{\c&H00FFFF&}}{text}{{\c&HFFFFFF&}}"
+                events.append(f"Dialogue: 0,{_ass_time(begin_cs)},{_ass_time(stop_cs)},Default,,0,0,0,,{' '.join(parts)}")
+        offset = limit
+    if outro_start is not None:
+        end_stamp = _ass_time(round((outro_start + OUTRO_SECONDS) * 100))
+        camera = ("m 11 0 l 31 0 b 37 0 42 5 42 11 l 42 31 b 42 37 37 42 31 42 "
+                  "l 11 42 b 5 42 0 37 0 31 l 0 11 b 0 5 5 0 11 0 "
+                  "m 11 4 b 7 4 4 7 4 11 l 4 31 b 4 35 7 38 11 38 l 31 38 "
+                  "b 35 38 38 35 38 31 l 38 11 b 38 7 35 4 31 4 l 11 4 "
+                  "m 21 11 b 35 11 35 31 21 31 b 7 31 7 11 21 11 "
+                  "m 21 15 b 13 15 13 27 21 27 b 29 27 29 15 21 15 "
+                  "m 33 6 b 37 6 37 12 33 12 b 29 12 29 6 33 6")
+        note = ("m 22 0 l 29 0 b 30 7 34 10 42 11 l 42 18 b 36 18 32 16 29 14 l 29 30 "
+                "b 29 39 22 44 14 43 b 3 42 0 32 5 26 b 9 21 16 20 20 21 l 20 29 "
+                "b 15 27 10 30 12 34 b 14 38 22 36 22 30 l 22 0")
+        play = ("m 8 0 l 34 0 b 39 0 42 3 42 8 l 42 22 b 42 27 39 30 34 30 "
+                "l 8 30 b 3 30 0 27 0 22 l 0 8 b 0 3 3 0 8 0 m 17 7 l 17 23 30 15")
+        for index, (y, icon, top_offset, handle) in enumerate((
+            (1310, camera, 21, "@thelobbycrew"),
+            (1390, note, 21, "@thelobbycrew"),
+            (1470, play, 15, "@TheLobbyCrew"),
+        )):
+            stamp = f"{_ass_time(round((outro_start + 0.07 + index * 0.12) * 100))},{end_stamp}"
+            top = y - top_offset
+            events.append(rf"Dialogue: 1,{stamp},Social,,0,0,0,,{{\an7\move(350,{top + 24},350,{top},0,300)\fad(220,0)\p1}}{icon}")
+            events.append(rf"Dialogue: 1,{stamp},Social,,0,0,0,,{{\move(422,{y + 24},422,{y},0,300)\fad(220,0)}}{handle}")
     return header + "\n".join(events) + "\n"
 
 
 def _filter_crop(rect: tuple[float, float, float, float], *, fit: bool = False) -> str:
     x, y, width, height = rect
+    panel_height = WEBCAM_HEIGHT if fit else SCREEN_HEIGHT
+    size = f"{OUTPUT_WIDTH}:{panel_height}"
+    source_crop = f"crop=iw*{width:.12g}:ih*{height:.12g}:iw*{x:.12g}:ih*{y:.12g}:exact=1"
     if fit:
-        return (f"crop=iw*{width:.12g}:ih*{height:.12g}:iw*{x:.12g}:ih*{y:.12g},"
-                "scale=1080:960:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                "pad=1080:960:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
-    return (f"crop=iw*{width:.12g}:ih*{height:.12g}:iw*{x:.12g}:ih*{y:.12g},"
-            "scale=1080:960:force_original_aspect_ratio=increase,"
-            "crop=1080:960,setsar=1")
+        fitted = f"scale={size}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,setsar=1"
+        return f"{source_crop},{fitted},pad={size}:(ow-iw)/2:(oh-ih)/2:color=0x141C22,setsar=1"
+    return (f"{source_crop},"
+            f"scale={size}:force_original_aspect_ratio=increase:force_divisible_by=2:flags=lanczos,"
+            f"crop={size},setsar=1")
+
+
+def _divider(branded: bool) -> str:
+    if branded:
+        return (f"drawbox=x=0:y={WEBCAM_HEIGHT - 2}:w=iw:h=8:color=0xD6B6FF:t=fill,"
+                f"drawbox=x=0:y={WEBCAM_HEIGHT + 6}:w=iw:h=2:color={TITLE_VIOLET}:t=fill")
+    return (f"drawbox=x=0:y={WEBCAM_HEIGHT}:w=iw:h=8:color=0x141C22:t=fill,"
+            f"drawbox=x=0:y={WEBCAM_HEIGHT + 2}:w=iw:h=4:color=0x68877F:t=fill")
+
+
+def _brand_video(frames: int, title_seconds: float) -> str:
+    logo = "[2:v]split[outro_logo][badge_logo];" if title_seconds else ""
+    outro_input = "[outro_logo]" if title_seconds else "[2:v]"
+    return (
+        f";[stack]fps=30,trim=end_frame={frames},setpts=N/(30*TB),split[main][tail];"
+        "[1:v]scale=172:-2:flags=lanczos,format=rgba,colorchannelmixer=aa=0.53[mark];"
+        f"[main][mark]overlay=x=(W-w)/2:y={TITLE_Y}-h/2:enable='gte(t,{title_seconds:.2f})'[marked];"
+        f"[tail]trim=start_frame={max(0, frames - OUTRO_FRAMES)},setpts=PTS-STARTPTS,"
+        f"scale=270:480,gblur=sigma=12:steps=3,scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT},"
+        f"drawbox=t=fill:color=black@0.52,tpad=stop_mode=clone:stop={max(0, OUTRO_FRAMES - frames)}[card];"
+        f"{logo}{outro_input}scale=900:900:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,"
+        "format=yuva420p,pad=1200:1200:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+        f"zoompan=z='1+0.23*(1-pow(1-min(on/{OUTRO_FRAMES - 1},1),2))':"
+        f"x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2':d={OUTRO_FRAMES}:s=640x640:fps=30,format=yuva420p[logo];"
+        "[card][logo]overlay=(W-w)/2:y='575+54*pow(max(1-t/0.55,0),3)':shortest=1[endcard];"
+        "[marked][endcard]concat=n=2:v=1:a=0,setpts=N/(30*TB)[finished]"
+    )
+
+
+def _outro_audio(clip_seconds: float, clip_frames: int, loudness: float | None) -> str:
+    normalize = f",loudnorm=I={loudness:.6g}:TP=-1.5:LRA=11" if loudness is not None else ""
+    clip_samples = clip_frames * 1600
+    outro_samples = OUTRO_FRAMES * 1600
+    source_samples = min(clip_samples, max(1, round(clip_seconds * 48000)))
+    fade_samples = min(3840, source_samples)
+    return (f";[0:a:0]atrim=end={clip_seconds:.9f},asetpts=PTS-STARTPTS{normalize},"
+            "aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"atrim=end_sample={clip_samples},afade=t=out:ss={source_samples - fade_samples}:ns={fade_samples},"
+            f"apad=whole_len={clip_samples + outro_samples}[aout]")
 
 
 def render_clip(
@@ -197,13 +336,15 @@ def render_clip(
     ffprobe: str = "ffprobe",
     cancel: Callable[[], bool] | None = None,
     max_output_bytes: int | None = None,
+    brand_dir: Path | None = None,
+    opening_title: str = "",
 ) -> Path:
     """Render and atomically publish an MP4; return its absolute path.
 
     ``start`` and ``end`` are source-relative seconds, with an exclusive end.
     Each crop is a normalized ``(x, y, width, height)`` rectangle. The full
-    facecam rectangle fits inside its panel with padding as needed; the content
-    rectangle is center-cropped to fill its panel. ``words`` is
+    facecam rectangle fits inside the top 38% with padding as needed; the content
+    rectangle is center-cropped to fill the bottom 62%. ``words`` is
     ordered by start time, with absolute source-second ``start``/``end`` and
     ``text`` strings, plus optional string ``correction`` (including empty).
     Captions are placed inside 100px horizontal/250px bottom safe margins.
@@ -211,6 +352,10 @@ def render_clip(
     ``cancel``, if supplied, is polled and raises RenderCancelled when true.
     ``max_output_bytes`` enforces a POSIX per-file limit on FFmpeg and rejects
     truncated or oversized output before publication.
+    ``brand_dir`` is an optional local Lobby Crew preset with watermark.png
+    and outro.png. It adds a centered watermark, title badge, and animated
+    silent outro over a blurred replay, after a brief source-audio fade.
+    ``opening_title`` overlays up to 60 characters without adding footage.
     Both tools may be executable paths. Existing output survives any failure.
     """
     start = _number(start, "start")
@@ -220,6 +365,8 @@ def render_clip(
     face = _crop(facecam_crop, "facecam_crop")
     content = _crop(content_crop, "content_crop")
     captions = _words(words, start, end)
+    if not isinstance(opening_title, str) or len(opening_title) > 60:
+        raise ValueError("Opening title must be a string of at most 60 characters")
     if not isinstance(include_audio, bool):
         raise ValueError("include_audio must be a bool")
     if max_output_bytes is not None and (type(max_output_bytes) is not int or max_output_bytes < 1):
@@ -250,34 +397,60 @@ def render_clip(
     if math.isfinite(duration) and end > duration + 0.001:
         raise ValueError("clip end exceeds source duration")
 
+    images = _brand_images(brand_dir) if brand_dir is not None else ()
+    clip_seconds = end - start
+    clip_frames = max(1, math.ceil(clip_seconds * 30 - 1e-8))
+    expected_duration = clip_frames / 30 + OUTRO_SECONDS if images else clip_seconds
     token = uuid.uuid4().hex
     subtitle_path = output_path.parent / f".streamframe-{token}.ass"
     partial_path = output_path.parent / f".streamframe-{token}.mp4"
     try:
-        graph = (f"[0:v:0]split=2[face][content];[face]{_filter_crop(face, fit=True)}[top];"
+        webcam = _filter_crop(face, fit=True)
+        graph = (f"[0:v:0]split=2[face][content];[face]{webcam}[top];"
                  f"[content]{_filter_crop(content)}[bottom];"
-                 "[top][bottom]vstack=inputs=2[stack]")
-        if captions:
-            subtitle_path.write_text(_ass(captions), encoding="utf-8")
+                 f"[top][bottom]vstack=inputs=2,{_divider(bool(images))}[stack]")
+        if images:
+            title_seconds = round(min(clip_seconds, TITLE_SECONDS) * 100) / 100 if _display_text(opening_title) else 0
+            if _display_text(opening_title):
+                title_seconds = max(0.01, title_seconds)
+            subtitle_path.write_text(_ass(captions, opening_title, clip_seconds, clip_frames / 30),
+                                     encoding="utf-8")
+            graph += _brand_video(clip_frames, title_seconds)
+            graph += f";[finished]ass=filename='{subtitle_path.name}'"
+            if title_seconds:
+                graph += ("[titled];[badge_logo]scale=124:124:force_original_aspect_ratio=decrease:"
+                          f"force_divisible_by=2:flags=lanczos,pad=124:124:(ow-iw)/2:(oh-ih)/2:color={TITLE_VIOLET}[badge];"
+                          f"[titled][badge]overlay=x=132:y={TITLE_Y - 62}:enable='lt(t,{title_seconds:.2f})'")
+            graph += "[decorated]"
+        elif captions or _display_text(opening_title):
+            subtitle_path.write_text(_ass(captions, opening_title, clip_seconds), encoding="utf-8")
             # The generated basename contains no filter-grammar metacharacters.
             graph += f";[stack]ass=filename='{subtitle_path.name}'[captioned]"
         else:
             graph += ";[stack]null[captioned]"
-        graph += ";[captioned]scale=in_range=auto:out_range=tv,format=yuv420p,setparams=range=limited[out]"
+        video = "decorated" if images else "captioned"
+        graph += f";[{video}]scale=in_range=auto:out_range=tv,format=yuv420p,setparams=range=limited[out]"
+        if audio and images:
+            graph += _outro_audio(clip_seconds, clip_frames, loudness_target_lufs)
         source_formats = str(info.get("format", {}).get("format_name", "")).split(",")
         input_options = _INPUT_OPTIONS + (_MOV_OPTIONS if "mov" in source_formats else [])
         args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-                *input_options, "-ss", f"{start:.9f}", "-i", str(source_path),
-                "-filter_complex", graph, "-map", "[out]"]
+                *input_options, "-ss", f"{start:.9f}", "-i", str(source_path)]
+        for image in images:
+            args += ["-protocol_whitelist", "file", "-f", "image2", "-pattern_type", "none",
+                     "-framerate", "30", "-c:v", "png", "-i", str(image)]
+        args += ["-filter_complex", graph, "-map", "[out]"]
         if audio:
-            args += ["-map", "0:a:0", "-c:a", "aac"]
-            if loudness_target_lufs is not None:
+            args += ["-map", "[aout]" if images else "0:a:0", "-c:a", "aac", "-b:a", "192k"]
+            if not images and loudness_target_lufs is not None:
                 args += ["-af", f"loudnorm=I={loudness_target_lufs:.6g}:TP=-1.5:LRA=11"]
         else:
             args += ["-an"]
-        args += ["-t", f"{end - start:.9f}", "-r", "30", "-fps_mode", "cfr",
+        args += ["-t", f"{expected_duration:.9f}", "-r", "30", "-fps_mode", "cfr",
                  "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_range", "tv",
                  "-movflags", "+faststart"]
+        if max_output_bytes is None:
+            args += ["-preset", "medium", "-crf", "17"]
         if max_output_bytes is not None:
             args += ["-fs", str(max_output_bytes)]
         args.append(str(partial_path))
@@ -305,13 +478,13 @@ def render_clip(
             actual_duration = float(rendered["format"]["duration"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RenderError("rendered output has no valid duration") from exc
-        if not math.isfinite(actual_duration) or abs(actual_duration - (end - start)) > 0.1:
-            raise RenderError(f"rendered duration {actual_duration} does not match requested duration {end - start}")
+        if not math.isfinite(actual_duration) or abs(actual_duration - expected_duration) > 0.1:
+            raise RenderError(f"rendered duration {actual_duration} does not match expected duration {expected_duration}")
         try:
             video_duration = float(rendered_video[0]["duration"])
         except (KeyError, TypeError, ValueError) as exc:
             raise RenderError("rendered video has no valid duration") from exc
-        if not math.isfinite(video_duration) or abs(video_duration - (end - start)) > 0.1:
+        if not math.isfinite(video_duration) or abs(video_duration - expected_duration) > 0.1:
             raise RenderError("rendered video duration does not match requested duration")
         _run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-xerror",
               *_INPUT_OPTIONS, *_MOV_OPTIONS, "-i", str(partial_path), "-map", "0:v:0", "-map", "0:a:0?",
@@ -332,17 +505,20 @@ def render_candidate(
     progress: Callable[[float, str], None] | None = None,
     cancelled: Any = None,
     max_output_bytes: int | None = None,
+    brand_dir: Path | None = None,
 ) -> Path:
     """Render a job candidate using dictionary crops and a threading.Event.
 
     Candidate keys are ``start``, ``end``, optional ``words``, and optional
     ``face_crop``/``content_crop`` dictionaries with x/y/width/height. Missing
-    crops use the full source for that panel. ``progress`` takes a fraction
+    screen crops use the full source; a webcam crop is required. ``progress`` takes a fraction
     and message; ``cancelled`` is an Event exposing ``is_set()``.
     """
     def rectangle(name: str) -> tuple[float, float, float, float]:
         value = candidate.get(name)
         if value is None:
+            if name == "face_crop":
+                raise ValueError("Set the webcam crop before exporting.")
             return (0, 0, 1, 1)
         try:
             return tuple(value[key] for key in ("x", "y", "width", "height"))
@@ -357,6 +533,8 @@ def render_candidate(
         words=candidate.get("words", ()),
         cancel=cancelled.is_set if cancelled is not None else None,
         max_output_bytes=max_output_bytes,
+        brand_dir=brand_dir,
+        opening_title=candidate.get("opening_title", ""),
     )
     if progress:
         progress(1, "Clip rendered and validated")

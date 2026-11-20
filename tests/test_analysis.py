@@ -80,6 +80,17 @@ class AnalysisTests(unittest.TestCase):
         )
         self.assertEqual(candidates, [])
 
+    def test_suggested_clip_opens_on_speech_instead_of_dead_air_or_mid_word(self):
+        words = [
+            {"start": 5.32 + index * 0.5, "end": 5.72 + index * 0.5,
+             "text": "Surprise!" if index == 0 else "reaction"}
+            for index in range(24)
+        ]
+        best, = rank_candidates(25, words, min_duration=15, max_duration=15,
+                                target_durations=(15,), max_candidates=1)
+        self.assertAlmostEqual(best["start"], 5.2, places=2)
+        self.assertEqual(best["evidence"]["opening_speech"], 1)
+
     def test_invalid_duration_or_candidate_limit_returns_no_candidates(self):
         self.assertEqual(rank_candidates(0, []), [])
         self.assertEqual(rank_candidates(15, [], visual_activity=[{"time": 1, "motion": 1}], max_candidates=0), [])

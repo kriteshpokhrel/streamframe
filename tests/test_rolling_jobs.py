@@ -37,7 +37,7 @@ def terminal(store, job_id):
 def runner(tmp_path, monkeypatch):
     def encode(raw, output, duration, event, maximum):
         output.write_bytes(raw.read_bytes())
-        return duration - 0.1
+        return duration - 0.1, 1280, 720
 
     def analyze(path, progress, event):
         return [
@@ -79,6 +79,34 @@ def handoff(directory, kwargs, index, *, sequence=None, payload=None):
     except Exception:
         path.unlink()
         raise
+
+
+@pytest.mark.parametrize("width,height,published", [
+    (1280, 720, True), (1920, 1080, True), (720, 1280, True),
+    (854, 480, False), (1280, 719, False),
+])
+def test_automatic_publication_requires_verified_720p_source(runner, monkeypatch, width, height, published):
+    def encode(raw, output, duration, event, maximum):
+        output.write_bytes(raw.read_bytes())
+        return duration - 0.1, width, height
+
+    monkeypatch.setattr(jobs, "_rolling_encode", encode)
+    store = runner(lambda resolved, directory, **kw: handoff(directory, kw, 1))
+    job = terminal(store, store.create(SOURCE)["id"])
+    assert job["status"] == "succeeded"
+    window = job["live_session"]["windows"][0]
+    assert (window["source_width"], window["source_height"]) == (width, height)
+    assert len(job["exports"]) == int(published)
+    assert job["live_session"]["windows_processed"] == 1
+    if not published:
+        assert window["status"] == "low_quality"
+        assert "requires at least 720p" in window["warning"]
+        candidate = job["candidates"][0]
+        assert candidate["editable"]
+        assert store.candidate_media_path(job["id"], candidate["id"]).is_file()
+        store.export(job["id"], candidate["id"])
+        job = candidate_finished(store, job["id"])
+        assert len(job["exports"]) == 1
 
 
 def test_exports_are_durable_while_capture_is_active_and_stop_preserves_them(runner):
@@ -750,7 +778,7 @@ def test_real_ffmpeg_reexports_retained_window_during_capture_and_after_stop(tmp
         pytest.skip("Caption correction requires FFmpeg with libass")
     fixture = tmp_path / "fixture.ts"
     subprocess.run([
-        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=128x96:rate=10",
+        "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=10",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "1",
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mpegts", str(fixture),
     ], check=True, timeout=15)

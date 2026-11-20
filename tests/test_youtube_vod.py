@@ -36,7 +36,7 @@ TS = b"\x47" + b"\x00" * 187
 def info(**overrides):
     return {
         "id": "qSyo5d-dVzA", "title": "Synthetic archive", "availability": "public",
-        "live_status": "was_live", "duration": 20,
+        "live_status": "was_live", "duration": 20, "language": "en-US",
         "formats": [{
             "url": MANIFEST, "protocol": "m3u8_native",
             "vcodec": "avc1", "acodec": "mp4a.40.2", "height": 360,
@@ -93,7 +93,7 @@ class FixtureFetch:
 @pytest.fixture
 def extraction(monkeypatch):
     event = threading.Event()
-    fetch = FixtureFetch(event, 12345)
+    fetch = FixtureFetch(event, time.monotonic() + 120)
 
     def remote_fetch(*_args, validate_url):
         fetch.validate_url = validate_url
@@ -111,7 +111,7 @@ def test_selective_import_reads_only_overlapping_segments_and_trims_local_fd(ext
     def trim(fd, directory, start, end, cancel, **options):
         assert os.read(fd, 1000) == TS * 2
         assert (start, end) == (1, 7)
-        assert cancel is event and options == {"deadline": 12345, "staged": True}
+        assert cancel is event and options == {"deadline": fetch.deadline, "staged": True}
         return "output.mp4"
 
     with patch.object(jobs, "trim_media", side_effect=trim):
@@ -120,13 +120,340 @@ def test_selective_import_reads_only_overlapping_segments_and_trims_local_fd(ext
     assert fetch.opened == [MANIFEST, CDN + "b.ts", CDN + "c.ts"]
     assert resolved == [("Synthetic archive", 12)]
 
+
+@pytest.mark.parametrize("start,end,full,success", [
+    (None, None, True, True), (0, 20, False, True), (1, 15, False, False),
+])
+def test_short_muxed_mp4_requires_whole_video(extraction, monkeypatch, tmp_path, start, end, full, success):
+    event, fetch = extraction
+    url = CDN + "video.mp4"
+    body = b"\x00\x00\x00\x18ftypisom"
+    fetch.bodies[url] = body
+    fetch.headers[(url, "Content-Type")] = "video/mp4"
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[{
+        "url": url, "protocol": "https", "vcodec": "avc1", "acodec": "mp4a.40.2",
+    }]))
+    with patch.object(jobs, "trim_media", side_effect=lambda fd, *_args, **_kw: os.read(fd, 100)) as trim:
+        if success:
+            assert vod.import_youtube_vod(PAGE, tmp_path, event, start, end, full_video=full) == body
+            assert trim.call_args.args[2:4] == (0, 20)
+            assert fetch.opened == [url]
+        else:
+            with pytest.raises(vod.YouTubeVodUnavailable):
+                vod.import_youtube_vod(PAGE, tmp_path, event, start, end, full_video=full)
+            assert not fetch.opened
+            trim.assert_not_called()
+
+
+def test_full_video_rejects_long_source_without_fetching_media(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(duration=301))
+    with pytest.raises(ValueError, match="limited to 5 minutes"):
+        vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True)
+    assert not fetch.opened
+
+
+def test_full_video_prefers_hd_picture_with_separate_audio(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    picture, sound, low = (CDN + name for name in ("hd", "sound", "low"))
+    body = b"\x00\x00\x00\x18ftypisom"
+    fetch.bodies.update({picture: body + b"video", sound: body + b"audio", low: body})
+    fetch.headers[(picture, "Content-Type")] = "video/mp4"
+    fetch.headers[(sound, "Content-Type")] = "audio/mp4"
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=low, protocol="https", height=360, vcodec="avc1", acodec="mp4a.40.2"),
+        dict(url=picture, protocol="https", height=1080, vcodec="avc1", acodec="none"),
+        dict(url=sound, protocol="https", vcodec="none", acodec="mp4a.40.2"),
+    ]))
+
+    def trim(fd, _directory, start, end, _event, *, audio_fd, deadline):
+        assert os.read(fd, 100) == body + b"video"
+        assert os.read(audio_fd, 100) == body + b"audio"
+        assert (start, end) == (0, 20)
+        return "output.mp4"
+
+    with patch.object(jobs, "trim_media", side_effect=trim):
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True) == "output.mp4"
+    assert fetch.opened == [picture, sound]
+
+
+def test_full_video_requires_a_youtube_video_link_and_no_range():
+    source = {"type": "url", "url": PAGE, "full_video": True}
+    assert jobs.validate_remote_source(source) == source
+    with pytest.raises(ValueError, match="cannot be combined"):
+        jobs.validate_remote_source({**source, "start": 0, "end": 20})
+    with pytest.raises(ValueError, match="YouTube"):
+        jobs.validate_remote_source({**source, "url": "https://www.twitch.tv/videos/1234"})
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_full_video_tries_other_hd_before_sd(extraction, monkeypatch, tmp_path, required):
+    event, fetch = extraction
+    hd, medium, sound, low = (CDN + name for name in ("1080", "720", "audio", "360"))
+    body = b"\x00\x00\x00\x18ftypisom"
+    formats = []
+    for url, height, acodec in ((hd, 1080, "none"), (medium, 720, "none"),
+                                (low, 360, "mp4a.40.2")):
+        fetch.bodies[url] = body
+        fetch.headers[(url, "Content-Type")] = "video/mp4"
+        formats.append(dict(url=url, height=height, protocol="https", vcodec="avc1", acodec=acodec))
+    fetch.headers[(hd, "Content-Type")] = "text/html"
+    fetch.bodies[sound] = body
+    fetch.headers[(sound, "Content-Type")] = "audio/mp4"
+    formats.append(dict(url=sound, protocol="https", vcodec="none", acodec="mp4a.40.2"))
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=formats))
+    before = fetch.remaining
+    with patch.object(jobs, "trim_media", return_value="hd.mp4") as trim:
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                      full_video=True, require_hd=required) == "hd.mp4"
+        assert "audio_fd" in trim.call_args.kwargs
+        assert trim.call_args.kwargs["deadline"] == fetch.deadline
+    assert fetch.opened == [hd, medium, sound]
+    assert fetch.remaining < before
+
+
+def test_full_video_tries_alternative_audio_without_redownloading_picture(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    picture, bad, good = (CDN + name for name in ("picture", "a-audio", "b-audio"))
+    body = b"\x00\x00\x00\x18ftypisom"
+    for url, mime in ((picture, "video/mp4"), (bad, "text/html"), (good, "audio/mp4")):
+        fetch.bodies[url] = body
+        fetch.headers[(url, "Content-Type")] = mime
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=picture, height=1080, protocol="https", vcodec="avc1", acodec="none"),
+        *(dict(url=url, protocol="https", vcodec="none", acodec="mp4a.40.2") for url in (bad, good)),
+    ]))
+    with patch.object(jobs, "trim_media", return_value="hd.mp4"):
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                      full_video=True, require_hd=True) == "hd.mp4"
+    assert fetch.opened == [picture, bad, good]
+
+
+def test_original_english_beats_aac_dub_and_never_falls_back_to_it(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    picture, dub, original = [CDN + name for name in ("picture", "dub", "original")]
+    fetch.bodies.update({picture: b"\x00\x00\x00\x20ftyp" + b"x" * 24,
+                         dub: b"\x00\x00\x00\x20ftyp" + b"x" * 24,
+                         original: b"\x1a\x45\xdf\xa3" + b"x" * 24})
+    for url, mime in [(picture, "video/mp4"), (dub, "audio/mp4"), (original, "audio/webm")]:
+        fetch.headers[url, "Content-Type"] = mime
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=picture, height=1080, protocol="https", vcodec="avc1", acodec="none"),
+        dict(url=dub, protocol="https", vcodec="none", acodec="mp4a.40.2",
+             language="hi", language_preference=-1),
+        dict(url=original, protocol="https", vcodec="none", acodec="opus",
+             language="en-US", language_preference=10),
+    ]))
+    with patch.object(jobs, "trim_media", return_value="english.mp4") as trim:
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                      full_video=True, require_hd=True) == "english.mp4"
+        assert trim.call_args.kwargs["audio_webm"]
+    assert fetch.opened == [picture, original]
+    fetch.opened.clear()
+    fetch.bodies[original] = b"invalid"
+    with patch.object(jobs, "trim_media") as trim, pytest.raises(vod.YouTubeVodUnavailable):
+        vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                               full_video=True, require_hd=True)
+    trim.assert_not_called()
+    assert fetch.opened == [picture, original]
+
+
+def test_english_dub_does_not_replace_a_non_english_original(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=CDN + "english", height=720, protocol="https", vcodec="avc1",
+             acodec="mp4a", language="en-US", language_preference=5),
+        dict(url=CDN + "original", protocol="https", vcodec="none",
+             acodec="opus", language="hi", language_preference=10),
+    ]))
+    with pytest.raises(vod.YouTubeVodUnavailable, match="original English audio"):
+        vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True, require_hd=True)
+    assert not fetch.opened
+
+
+@pytest.mark.parametrize("failure", [None, "incorrect-offset", "inconsistent-total", "truncated", "request-cap"])
+def test_full_track_is_reassembled_when_whole_get_is_denied(extraction, monkeypatch, tmp_path, failure):
+    event, fetch = extraction
+    track = CDN + "range-only"
+    payload = b"\x00\x00\x00\x20ftyp" + b"x" * 22
+    requested = []
+    initial_budget = fetch.remaining
+    monkeypatch.setattr(vod, "TRACK_RANGE_BYTES", 12)
+    if failure == "request-cap":
+        monkeypatch.setattr(vod, "MAX_TRACK_RANGE_REQUESTS", 2)
+
+    @contextmanager
+    def open_track(url, *, byte_range=None):
+        assert url == track
+        fetch.check()
+        if byte_range is None:
+            raise jobs.RemoteForbidden("whole GET unavailable")
+        requested.append(byte_range)
+        first, stop = byte_range
+        last = min(stop, len(payload) - 1)
+        total = len(payload)
+        body = payload[first:last + 1]
+        if first and failure == "incorrect-offset":
+            first -= 1
+        if first and failure == "inconsistent-total":
+            total += 1
+        length = len(body)
+        if first and failure == "truncated":
+            body = body[:-1]
+        yield url, ({"Content-Type": "video/mp4", "Content-Length": str(length),
+                     "Content-Range": f"bytes {first}-{last}/{total}"}, body)
+
+    @contextmanager
+    def open_response(*args, **kwargs):
+        with open_track(*args, **kwargs) as (url, (headers, body)):
+            yield url, type("Response", (), {"getheader": lambda _, key, default=None: headers.get(key, default),
+                                            "body": body})()
+
+    def chunks(response):
+        fetch.remaining -= len(response.body)
+        yield response.body
+
+    monkeypatch.setattr(fetch, "open", open_response)
+    monkeypatch.setattr(fetch, "chunks", chunks)
+    metadata = info(formats=[dict(url=track, height=720, protocol="https", vcodec="avc1", acodec="mp4a")])
+
+    def verify(fd, *_args, **kwargs):
+        assert kwargs["require_hd"]
+        assert os.read(fd, len(payload) + 1) == payload
+        return "verified.mp4"
+
+    with patch.object(jobs, "trim_media", side_effect=verify) as trim:
+        result = vod._whole_mp4(metadata, 20, tmp_path, fetch, None, require_hd=True)
+    if failure:
+        assert result is None
+        trim.assert_not_called()
+        assert requested == [(0, 11), (12, 23)]
+    else:
+        assert result == "verified.mp4"
+        assert requested == [(0, 11), (12, 23), (24, 29)]
+        assert fetch.remaining == initial_budget - len(payload)
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
                     reason="FFmpeg tools unavailable")
-def test_job_imports_selected_youtube_hls_range_with_real_media(tmp_path, monkeypatch):
+def test_full_video_accepts_hd_vp9_with_opus_when_avc_is_unavailable(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    avc, picture, sound = (CDN + name for name in ("avc", "vp9", "opus"))
+    picture_path, sound_path = tmp_path / "picture.webm", tmp_path / "sound.webm"
+    subprocess.run([
+        "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=s=1280x720:r=5:d=1",
+        "-c:v", "libvpx-vp9", str(picture_path),
+        "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=1",
+        "-map", "1:a", "-c:a", "libopus", str(sound_path),
+    ], check=True, capture_output=True)
+    fetch.bodies.update({avc: b"unavailable!", picture: picture_path.read_bytes(),
+                         sound: sound_path.read_bytes()})
+    fetch.headers[(picture, "Content-Type")] = "video/webm"
+    fetch.headers[(sound, "Content-Type")] = "audio/webm"
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(duration=1, formats=[
+        dict(url=avc, height=720, protocol="https", vcodec="avc1", acodec="none"),
+        dict(url=picture, height=720, protocol="https", vcodec="vp9", acodec="none"),
+        dict(url=sound, protocol="https", vcodec="none", acodec="opus"),
+    ]))
+    result = vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True, require_hd=True)
+    streams = json.loads(subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_entries", "stream=codec_name,width,height", "-of", "json", str(result),
+    ]))["streams"]
+    assert streams == [{"codec_name": "h264", "width": 1280, "height": 720}, {"codec_name": "aac"}]
+    assert fetch.opened == [avc, picture, sound]
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_sd_fallback_is_available_only_when_hd_not_required(extraction, monkeypatch, tmp_path, required):
+    event, fetch = extraction
+    url = CDN + "sd"
+    body = b"\x00\x00\x00\x18ftypisom"
+    fetch.bodies[url] = body
+    fetch.headers[(url, "Content-Type")] = "video/mp4"
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=url, height=360, protocol="https", vcodec="avc1", acodec="mp4a.40.2"),
+        *info()["formats"],
+    ]))
+    with patch.object(jobs, "trim_media", return_value="sd.mp4") as trim:
+        if required:
+            with pytest.raises(vod.YouTubeVodUnavailable, match="no SD fallback"):
+                vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                       full_video=True, require_hd=True)
+            assert not fetch.opened
+            trim.assert_not_called()
+        else:
+            assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                          full_video=True) == "sd.mp4"
+            assert fetch.opened == [url]
+
+
+def test_required_hd_can_use_verified_hd_hls(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    metadata = info()
+    metadata["formats"][0]["height"] = 720
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: metadata)
+    with patch.object(jobs, "trim_media", return_value="hd.mp4"):
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                      full_video=True, require_hd=True) == "hd.mp4"
+    assert fetch.opened == [MANIFEST, *(CDN + c + ".ts" for c in "abcd")]
+
+
+@pytest.mark.parametrize("require_hd", [True, False, "true", 1, None])
+def test_require_hd_is_explicit_full_video_only(require_hd):
+    source = dict(type="url", url=PAGE, require_hd=require_hd)
+    with pytest.raises(ValueError, match="require_hd"):
+        jobs.validate_remote_source(source)
+    source["full_video"] = True
+    if type(require_hd) is bool:
+        assert jobs.validate_remote_source(source) == source
+    else:
+        with pytest.raises(ValueError, match="require_hd"):
+            jobs.validate_remote_source(source)
+
+
+@pytest.mark.parametrize("options", [{"full_video": True}, {"full_video": True, "require_hd": False},
+                                     {"start": 2, "end": 5}])
+def test_import_remote_enforces_hd_contract(tmp_path, options):
+    source = dict(type="url", url=PAGE, **options)
+    with patch.object(vod, "import_youtube_vod", return_value="hd.mp4") as importer:
+        assert jobs.import_remote(source, tmp_path, threading.Event()) == "hd.mp4"
+    assert importer.call_args.kwargs["require_hd"] is True
+    assert importer.call_args.kwargs["full_video"] is options.get("full_video", False)
+
+
+def test_hd_alternative_requests_are_capped(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    formats = []
+    for index in range(vod.MAX_MP4_TRACK_REQUESTS + 2):
+        url = CDN + f"bad-{index:02}"
+        fetch.bodies[url] = b"not accessible"
+        formats.append(dict(url=url, height=1080, protocol="https", vcodec="avc1", acodec="mp4a.40.2"))
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=formats))
+    with pytest.raises(vod.YouTubeVodUnavailable, match="no SD fallback"):
+        vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True, require_hd=True)
+    assert len(fetch.opened) == vod.MAX_MP4_TRACK_REQUESTS
+
+
+def test_hd_alternatives_do_not_retry_after_cancellation(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=CDN + name, height=height, protocol="https", vcodec="avc1", acodec="mp4a.40.2")
+        for name, height in (("1080", 1080), ("720", 720), ("360", 360))
+    ]))
+    with patch.object(vod, "_read_mp4", side_effect=jobs.Cancelled()) as read:
+        with pytest.raises(jobs.Cancelled):
+            vod.import_youtube_vod(PAGE, tmp_path, event, None, None, full_video=True)
+    assert read.call_count == 1
+
+
+@pytest.mark.parametrize("height", [720, 718])
+@pytest.mark.skipif(not shutil.which("ffmpeg") or not shutil.which("ffprobe"),
+                    reason="FFmpeg tools unavailable")
+def test_job_verifies_youtube_hls_resolution_with_real_media(tmp_path, monkeypatch, height):
     manifest = tmp_path / "index.m3u8"
     subprocess.run([
         "ffmpeg", "-v", "error", "-y",
-        "-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=8",
+        "-f", "lavfi", "-i", f"testsrc2=s=1280x{height}:r=10:d=8",
         "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=8",
         "-c:v", "libx264", "-g", "20", "-sc_threshold", "0", "-c:a", "aac",
         "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod",
@@ -144,7 +471,9 @@ def test_job_imports_selected_youtube_hls_range_with_real_media(tmp_path, monkey
         return fetch
 
     monkeypatch.setattr(jobs, "RemoteFetch", remote_fetch)
-    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(duration=8))
+    metadata = info(duration=8)
+    metadata["formats"][0]["height"] = 720
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: metadata)
     store = jobs.JobStore(tmp_path / "data", [tmp_path], lambda *_: {"candidates": []}, lambda *_: None)
     try:
         job = store.create({"type": "url", "url": PAGE, "start": 2.5, "end": 5.5})
@@ -154,9 +483,14 @@ def test_job_imports_selected_youtube_hls_range_with_real_media(tmp_path, monkey
             if job["status"] in {"succeeded", "failed", "cancelled"}:
                 break
             time.sleep(0.05)
+        assert fetches[0].opened == [MANIFEST, CDN + "index1.ts", CDN + "index2.ts"]
+        if height < 720:
+            assert job["status"] == "failed"
+            assert "did not verify at 720p" in job["error"]
+            assert not (store.root / job["id"] / "source.mp4").exists()
+            return
         assert job["status"] == "succeeded", job
         assert job["resolved_source"]["platform"] == "youtube"
-        assert fetches[0].opened == [MANIFEST, CDN + "index1.ts", CDN + "index2.ts"]
         details = json.loads(subprocess.check_output([
             "ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json",
             str(store.media_path(job["id"])),

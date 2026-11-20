@@ -17,7 +17,7 @@ from unittest.mock import patch
 import uuid
 
 from streamframe.jobs import (
-    Cancelled, Conflict, DownloadProxy, JobStore, analyze_media, hls_segments, padded_face_crop,
+    Cancelled, Conflict, DownloadProxy, JobStore, analyze_media, hls_segments,
     public_target, resolve_video, source_range, validate_remote_source,
     validate_candidate,
 )
@@ -32,7 +32,7 @@ except ImportError:
 def candidate():
     return dict(id="clip1", start=1.0, end=3.0, score=0.8, evidence=["speech"],
                 words=[dict(start=1.0, end=1.5, text="Hello")],
-                face_crop=None, content_crop=None)
+                face_crop={"x": 0.1, "y": 0.1, "width": 0.3, "height": 0.3}, content_crop=None)
 
 
 def analyze(path, progress, cancelled):
@@ -285,20 +285,17 @@ class StoreTests(Workspace):
         self.assertEqual(options["ffmpeg_path"], "/custom/ffmpeg")
         self.assertFalse(options["cancellation_callback"]())
         self.assertEqual(len(output), 1)
-        crop = validate_candidate(output[0])["face_crop"]
-        self.assertAlmostEqual(crop["width"] * 1000 / (crop["height"] * 500), 9 / 8)
-        self.assertLessEqual(crop["x"], 0.1)
-        self.assertGreaterEqual(crop["x"] + crop["width"], 0.3)
+        self.assertIsNone(validate_candidate(output[0])["face_crop"])
         self.assertEqual(output[0]["words"], [{"start": 1, "end": 2, "text": "Hi"}])
         self.assertEqual(result["source_words"], [
             {"start": 1, "end": 2, "text": "Hi"},
             {"start": 5, "end": 6, "text": "Outside"},
         ])
-        self.assertIn("verify the face crop", output[0]["evidence"][-1])
+        self.assertIn("set the webcam crop manually", output[0]["evidence"][-1])
         payload["facecam"] = {"box": None}
         with patch("streamframe.jobs.importlib.import_module", return_value=module):
             output = analyze_media(self.source, lambda *args: None, event)["candidates"]
-        self.assertIn("set the face crop manually", output[0]["evidence"][-1])
+        self.assertIn("set the webcam crop manually", output[0]["evidence"][-1])
         payload["facecam"] = {
             "box": {"x": 20, "y": 30, "width": 600, "height": 200},
             "framing": "webcam_boundary",
@@ -311,7 +308,7 @@ class StoreTests(Workspace):
         payload["facecam"]["framing"] = "face_fallback"
         with patch("streamframe.jobs.importlib.import_module", return_value=module):
             output = analyze_media(self.source, lambda *args: None, event)["candidates"]
-        self.assertIn("Webcam boundary uncertain", output[0]["evidence"][-1])
+        self.assertIsNone(output[0]["face_crop"])
 
     def test_expanding_candidate_preserves_transcript_and_corrections(self):
         payload = {
@@ -619,13 +616,23 @@ class StoreTests(Workspace):
         finally:
             store.close()
 
-    def test_face_crop_contains_portrait_box_near_edge(self):
-        crop = padded_face_crop({"x": 0, "y": 350, "width": 80, "height": 140}, 1000, 500)
-        self.assertEqual(crop["x"], 0)
-        self.assertAlmostEqual(crop["width"] * 1000 / (crop["height"] * 500), 9 / 8)
-        self.assertLessEqual(crop["y"] * 500, 350)
-        self.assertGreaterEqual((crop["y"] + crop["height"]) * 500, 490)
-        self.assertIsNone(padded_face_crop({"x": 0, "y": 0, "width": 65, "height": 150}, 100, 200))
+    def test_webcam_edit_is_shared_but_other_candidate_fields_are_not(self):
+        store = JobStore(self.workspace / "data", [self.workspace], analyze, render)
+        try:
+            job_id = store.create({"type": "file", "path": str(self.source)})["id"]
+            original = self.wait(store, job_id)["candidates"][0]
+            sibling = {**original, "id": "clip2", "face_crop": None}
+            store.update(job_id, candidates=[original, sibling])
+            with self.assertRaisesRegex(ValueError, "Set the webcam crop"):
+                store.export(job_id, "clip2")
+            crop = {"x": 0.03, "y": 0.25, "width": 0.32, "height": 0.43}
+            store.edit(job_id, original["id"], {"face_crop": crop, "end": 4})
+            selected, other = store.get(job_id)["candidates"]
+            self.assertEqual(selected["face_crop"], crop)
+            self.assertEqual(other, {**sibling, "face_crop": crop})
+            self.assertEqual(selected["end"], 4)
+        finally:
+            store.close()
 
 
 @unittest.skipIf(create_app is None, "FastAPI/httpx dependencies unavailable")

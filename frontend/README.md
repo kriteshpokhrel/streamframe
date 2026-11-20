@@ -9,8 +9,10 @@ From `frontend/`, install the pinned packages with your preferred package manage
 then run `npm run dev`. Vite proxies `/api` to `http://127.0.0.1:8000`; adjust
 `vite.config.ts` if your backend listens elsewhere. `npm run build` type-checks
 and writes the static application to `frontend/dist/`. Serve that directory from
-the backend at `/`, preserving `/api/*` routes. No client-side routing fallback
-is needed. No external fonts, analytics, or services are used.
+the backend at `/`, preserving `/api/*` routes. Sources, the import form,
+review (with source and moment IDs), live monitoring, and exports use hash
+routes so browser Back and deep links work without a server-side fallback.
+No external fonts, analytics, or services are used.
 The development proxy preserves the browser Host header (`changeOrigin: false`)
 and does not enable forwarded headers, so same-origin checks see the Vite origin.
 If deploying behind another proxy that rewrites Host, configure the backend's
@@ -41,6 +43,8 @@ explicit allowed loopback origins for development rather than disabling checks.
   For a specific finished-video range, import submits
   `{ "source": { "type": "url", "url": "https://…", "start": 60, "end": 120 } }`
   or `{ "source": { "type": "file", "path": "/absolute/path" } }`.
+  The import form accepts original-video times as `HH:MM:SS`, `MM:SS`, or
+  seconds (including fractional seconds), and converts them to API seconds.
   Local sources may include optional numeric `start` and/or `end` import bounds
   in original-file seconds. End-only starts at 0; start-only ends at start + 1800
   seconds or EOF; explicit bounds require `0 ≤ start < end` and at most 1800
@@ -86,9 +90,11 @@ explicit allowed loopback origins for development rather than disabling checks.
   changes to locally edited fields are flagged; saving is last-write-wins because
   the supplied contract has no version/ETag precondition.
 - `GET /api/jobs/{id}/media` must serve browser-decodable video with correct MIME
-  type and byte-range support for seeking. Native video controls play the source;
-  **Play clip** bounds playback to the selected range. Crops/captions are preview
-  overlays only; actual rendering is performed by the backend.
+  type and byte-range support for seeking. Native controls are available in
+  **Source video**; **Play clip** bounds playback to the selected range from
+  either view. The preview format and correction tools share one player.
+  **Portrait framing** is not the final render. Open **Export history** or
+  **View exports** to watch the finished clip.
 - Export POST has an empty body and uses saved candidate data. The preferred
   JSON response is `{ "filename": "clip.mp4" }` or
   `{ "files": [{ "filename": "clip.mp4" }] }`. Arrays, `exports`/`outputs`

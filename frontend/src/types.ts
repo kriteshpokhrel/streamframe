@@ -22,6 +22,7 @@ export interface Candidate {
   words: Word[];
   face_crop?: Rect | null;
   content_crop?: Rect | null;
+  opening_title?: string;
   editable?: boolean;
   media_url?: string | null;
   source_media_url?: string | null;
@@ -50,6 +51,7 @@ export interface JobExport {
   revision?: number;
   window_index?: number;
   created_at?: string;
+  date_from_file?: boolean;
   start?: number;
   end?: number;
 }
@@ -58,14 +60,17 @@ export interface Job {
   id: string;
   status: string;
   progress: number;
+  auto_export_pending?: string[];
+  export_candidate_id?: string | null;
   candidates: Candidate[];
   error?: unknown;
   source: string | { type: 'file'; path: string; start?: number; end?: number } |
-    ({ type: 'url'; url: string; start?: number; end?: number;
+    ({ type: 'url'; url: string; start?: number; end?: number; full_video?: true; require_hd?: true;
       mode?: 'auto' | 'live' | 'latest'; duration?: number } & RollingOptions) |
     ({ type: 'streamer'; platform: 'twitch' | 'youtube'; identifier: string;
       mode: 'auto' | 'live' | 'latest'; duration?: number; start?: number; end?: number } & RollingOptions);
   exports?: JobExport[];
+  created_at?: number;
   live_session?: {
     phase: string;
     windows_seen: number;
@@ -81,7 +86,7 @@ export interface Job {
 }
 
 export type CandidateChanges = Partial<Pick<Candidate,
-  'start' | 'end' | 'words' | 'face_crop' | 'content_crop'
+  'start' | 'end' | 'words' | 'face_crop' | 'content_crop' | 'opening_title'
 >>;
 
 export interface ExportFile {
