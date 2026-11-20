@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools==75.8.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamframe"
+version = "0.1.0"
+description = "Local-first video clipping and editing"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn==0.34.3",
+  "faster-whisper==1.1.1",
+  "numpy==2.2.6",
+  "opencv-python-headless==4.11.0.86",
+  "requests==2.32.5",
+  "yt-dlp==2025.10.22",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.3.5", "httpx==0.28.1"]
+
+[project.scripts]
+streamframe = "streamframe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["streamframe*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
