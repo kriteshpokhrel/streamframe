@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON="$ROOT/.venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+    printf '%s\n' "StreamFrame's local environment is missing. Follow the setup instructions in $ROOT/README.md." >&2
+    exit 1
+fi
+
+if [ -n "${STREAMFRAME_FFMPEG_PATH:-}" ]; then
+    FFMPEG=$STREAMFRAME_FFMPEG_PATH
+elif [ -n "${STREAMFRAME_FFMPEG:-}" ]; then
+    FFMPEG=$STREAMFRAME_FFMPEG
+elif [ -x /opt/homebrew/opt/ffmpeg-full/bin/ffmpeg ]; then
+    FFMPEG=/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg
+else
+    FFMPEG=$(command -v ffmpeg || true)
+fi
+if [ -z "$FFMPEG" ] || [ ! -x "$FFMPEG" ]; then
+    printf '%s\n' "FFmpeg was not found. Install a build with libx264, AAC, and libass or set STREAMFRAME_FFMPEG_PATH." >&2
+    exit 1
+fi
+FFMPEG_DIR=$(CDPATH= cd -- "$(dirname -- "$FFMPEG")" && pwd)
+if [ ! -x "$FFMPEG_DIR/ffprobe" ]; then
+    printf '%s\n' "ffprobe must be available alongside $FFMPEG." >&2
+    exit 1
+fi
+export PATH="$FFMPEG_DIR:$ROOT/.venv/bin:$PATH"
+export STREAMFRAME_FFMPEG_PATH="$FFMPEG_DIR/$(basename -- "$FFMPEG")"
+export PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+cd "$ROOT"
+if [ "$#" -eq 0 ]; then
+    set -- serve
+fi
+exec "$PYTHON" -m streamframe.cli "$@"

@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+*.egg-info/
+frontend/node_modules/
+frontend/dist/
+frontend/.test-dist/
+frontend/.browser-test-*/
+frontend/*.tsbuildinfo
+data/
+.streamframe/
+.DS_Store
