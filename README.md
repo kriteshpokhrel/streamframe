@@ -23,6 +23,10 @@ need Python 3.10, Node.js 22, and FFmpeg/ffprobe with `libx264`, AAC and the
 build must already be installed. See [START.md](START.md) for capability checks,
 other operating-system details, and troubleshooting.
 
+On Windows, run `start.cmd` from Command Prompt in the repository root.
+It builds the editor with Windows npm and runs the backend in WSL, not
+native Windows Python. See [Windows setup](START.md#windows-one-command-start).
+
 ```sh
 git clone https://github.com/kriteshpokhrel/streamframe.git
 cd streamframe
@@ -49,11 +53,11 @@ Once the model is available, start the app:
 ./streamframe
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765), add a supported source,
-review a suggested moment, adjust the webcam and captions, then export.
-For automated live clips, select **Live now only** and **Make clips
-automatically for a bounded session** under Capture options. Finished exports
-appear in **Exported videos**. Obtain the creator's permission before sharing.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), choose **Add source**,
+and review a suggested moment. Trim the clip, check framing and captions,
+then select **Export clip**. For automated live clips, choose **Clip a channel**,
+**Live now only**, and **Make clips automatically for a bounded session**.
+Finished files appear under **Exports**. Obtain the creator's permission before sharing.
 
 **Handing setup to an agent?** Give it [START.md](START.md); it includes
 explicit setup permissions, verification, privacy limits, and recovery steps.
@@ -65,36 +69,60 @@ explicit setup permissions, verification, privacy limits, and recovery steps.
 | Twitch channel | Live capture or latest finished archive when a compatible public HLS stream is available. |
 | Twitch video | A selected range of a compatible finished HLS archive. |
 | YouTube channel or live link | Public live streams with compatible HLS; availability is not guaranteed. |
-| YouTube finished video | Limited to compatible clear, multiplexed MPEG-TS HLS with a complete verified timeline. Most YouTube recordings are not supported. |
+| YouTube finished video | Verified 720p or better, with no SD fallback. **Full video** up to five minutes supports compatible MP4, separate MP4/WebM tracks, or HLS. Partial ranges require clear, multiplexed MPEG-TS HLS with a verified timeline. |
 | Local file | A backend-readable file or selected range, subject to the configured import roots. |
 
 Remote media is retrieved and cached automatically within the documented
 limits. Private or protected videos, separate HLS audio, encrypted streams,
-YouTube DASH and direct MP4 URLs are not supported; there is no silent
-whole-video download fallback.
+YouTube DASH and pasted direct media URLs are not supported. Partial ranges
+never fall back to downloading the whole video.
 
 ## What to expect
 
 - Short live captures and bounded archive imports. Finished YouTube video
   ranges work only with public, unencrypted, multiplexed MPEG-TS HLS and
-  a complete, verified timeline. Most YouTube VOD formats are unsupported;
-  streams still processing after going offline are not ready. There is no
-  DASH, direct MP4, or whole-video fallback. See
+  a complete, verified timeline, unless the request covers the entire short
+  video. Streams still processing after going offline are not ready. See
   [source formats and limits](START.md#source-formats-and-limits).
 - [Rolling live sessions](START.md#rolling-live-sessions) default to 10
   minutes and accept up to 30 minutes, with windows of at most 60 seconds.
   The 512 MiB transfer and shared media disk budgets, plus the 900-segment
   and 900-window caps, can end capture earlier.
 - Local word-timed transcription, heuristic highlight ranking (including
-  visual cues for speech-free material), face-box suggestions, and editable
+  quick speech openings and visual cues for speech-free material), webcam-boundary suggestions, and editable
   caption timing and crops. Scores are not probabilities. Face detection is
   not identity verification, and captions are not translations.
 - 1080 × 1920 H.264/AAC MP4 exports with split-screen framing and burned-in
-  word captions when present. The webcam panel keeps the entire selected
-  rectangle and pads it as needed. If the detector cannot find a stable
-  webcam boundary, it can suggest a roomy crop around the face instead;
-  review and correct that estimate before sharing. Correcting captions
+  word captions when present. The top 38% preserves the full webcam crop
+  without stretching; a divider separates it from the bottom 62% screen
+  panel. Detection compares webcam seams across source frames, including
+  overlays flush with a screen edge. If it cannot find a stable boundary, trace it
+  in Framing before exporting. A webcam edit carries across moments in
+  the same imported source and saving applies it to all those moments.
+  Existing exports are unchanged until you re-export. Correcting captions
   does not change the audio.
+
+With automatic export enabled in **Add Source**, choose the opening title for
+both clips: **Use video title** (the default, or the filename for a local video),
+**No title**, or **Custom title**. Moments without usable webcam framing stay
+in review.
+
+### Lobby Crew export preset
+
+Put `watermark.png` (a transparent wordmark) and `outro.png` (the full logo)
+in `lobby-crew` inside the StreamFrame data directory (`~/.streamframe` by
+default). New exports from the editor for non-rolling jobs use the Lobby
+Crew template automatically. A lavender line separates the full webcam view
+from gameplay; flat dark padding preserves the full webcam view where needed.
+An optional opening title uses a solid violet card with a thin lavender
+outline, centered soft-white text, and an inset logo. A translucent wordmark
+appears centered on the divider when the title clears (or from the start
+without a title). The 1.5-second animated outro includes the Instagram,
+TikTok, and YouTube handles over a blurred replay of the clip ending. The
+clip audio fades briefly at the cut. The outro is silent; it never repeats
+dialogue or adds music.
+The preset does not change trim points or existing MP4s. Remove the preset
+directory to return to unbranded exports. Rolling capture is unchanged.
 
 ## CLI and local automation
 

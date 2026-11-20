@@ -154,18 +154,22 @@ class RealFaceIntegrationTests(unittest.TestCase):
                 return np.frombuffer(raw, dtype=np.uint8).reshape((1920, 1080, 3))
 
             before, first, second, after = (frame_at(t) for t in (0.1, 0.4, 0.8, 1.2))
-            detector = cv2.FaceDetectorYN.create(str(MODEL), "", (1080, 960), 0.6, 0.3, 5000)
-            _, faces = detector.detect(cv2.cvtColor(first[:960], cv2.COLOR_RGB2BGR))
+            # Inspect the actual encoded seam, including both sides of the divider.
+            self.assertGreater(int(first[728, 40, 0]), 10)  # webcam matte
+            self.assertGreater(int(first[733, 40, 1]), int(first[729, 40, 1]) + 60)
+            self.assertGreater(int(first[739, 40, 2]), int(first[739, 40, 0]) + 100)
+            detector = cv2.FaceDetectorYN.create(str(MODEL), "", (1080, 730), 0.6, 0.3, 5000)
+            _, faces = detector.detect(cv2.cvtColor(first[:730], cv2.COLOR_RGB2BGR))
             self.assertIsNotNone(faces, "face is missing from rendered top panel")
-            scale = min(1080 / width, 960 / height)
+            scale = min(1080 / width, 730 / height)
             expected_x = (1080 - width * scale) / 2 + (box["x"] - x) * scale
-            expected_y = (960 - height * scale) / 2 + (box["y"] - y) * scale
+            expected_y = (730 - height * scale) / 2 + (box["y"] - y) * scale
             expected_w = box["width"] * scale
             expected_h = box["height"] * scale
             self.assertGreaterEqual(expected_x, 0)
             self.assertGreaterEqual(expected_y, 0)
             self.assertLessEqual(expected_x + expected_w, 1080)
-            self.assertLessEqual(expected_y + expected_h, 960)
+            self.assertLessEqual(expected_y + expected_h, 730)
 
             def overlap(face):
                 fx, fy, fw, fh = face[:4]
@@ -192,7 +196,7 @@ class RealFaceIntegrationTests(unittest.TestCase):
         finally:
             shutil.rmtree(work)
 
-    def test_full_frame_portrait_has_roomy_fallback_not_a_webcam_boundary(self):
+    def test_full_frame_portrait_does_not_invent_a_webcam_boundary(self):
         work = FIXTURES / (".real-face-test-" + uuid.uuid4().hex)
         work.mkdir()
         try:
@@ -205,16 +209,10 @@ class RealFaceIntegrationTests(unittest.TestCase):
             result = analysis.discover_facecam(
                 source, ffmpeg_path=FFMPEG, yunet_model_path=MODEL, sample_count=4,
             )
-            self.assertEqual(result["framing"], "face_fallback", result)
             self.assertEqual(result["reason"], "webcam_boundary_uncertain")
-            box, face = result["box"], result["face_box"]
-            self.assertIsNotNone(jobs.padded_face_crop(box, 294, 400))
-            for start, size, limit in (("x", "width", 294), ("y", "height", 400)):
-                self.assertGreater(box[size], face[size] * 1.5)
-                self.assertLessEqual(0, box[start])
-                self.assertLessEqual(box[start], face[start])
-                self.assertGreaterEqual(box[start] + box[size], face[start] + face[size])
-                self.assertLessEqual(box[start] + box[size], limit)
+            self.assertFalse(result["detected"])
+            self.assertIsNone(result["box"])
+            self.assertGreater(result["face_box"]["width"], 0)
         finally:
             shutil.rmtree(work)
 

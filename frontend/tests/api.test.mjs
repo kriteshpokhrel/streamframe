@@ -100,6 +100,8 @@ test('legacy unsupported bounded acquisition failures are not mislabeled as reso
     'YouTube post-live processing unavailable — see job error');
   assert.equal(failedSourceStatus({ error: 'YouTube bounded VOD acquisition is unsupported' }),
     'Source acquisition unsupported — see job error');
+  assert.equal(failedSourceStatus({ error: 'YouTubeVodUnavailable: YouTube exposes no supported muxed HLS archive; no verified selective index for its other formats' }),
+    'Source acquisition unsupported — see job error');
   assert.equal(failedSourceStatus({ error: { message: 'Bounded source acquisition not supported' } }),
     'Source acquisition unsupported — see job error');
   assert.equal(failedSourceStatus({ error: 'SourceResolutionError: missing channel' }),

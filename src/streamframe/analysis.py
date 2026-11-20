@@ -420,6 +420,25 @@ def _candidate_score(
     if energy is not None:
         normalized_energy = min(1.0, energy / max(0.03, max_audio_energy))
     duration_fit = max(0.0, 1.0 - abs(duration - target) / max(target, 1.0))
+    opening_speech = None
+    opening_emphasis = 0.0
+    if tokens:
+        first = overlaps[0]
+        lead_in = float(first["start"]) - start
+        if lead_in < 0:
+            opening_speech = 0.0  # Starts inside a word.
+        else:
+            opening_speech = max(0.0, 1.0 - max(0.0, lead_in - 0.15) / 1.35)
+            opening_text = " ".join(w["text"] for w in overlaps if float(w["end"]) <= start + 2.0)
+            if re.search(r"[!?]", opening_text) or any(
+                token.lower() in _EMPHASIS_WORDS for token in _WORD_RE.findall(opening_text)
+            ):
+                opening_emphasis = opening_speech
+    opening_motion = max(
+        (motion for sample, motion in zip(visual_samples, motion_values)
+         if float(sample["time"]) <= start + 2.0),
+        default=None,
+    )
 
     # Missing audio/confidence is neutral rather than penalizing valid text-only clips.
     evidence: dict[str, float | None] = {
@@ -434,6 +453,9 @@ def _candidate_score(
         "visual_scene_changes": round(visual_scene_changes, 4),
         "audio_energy": round(normalized_energy, 4) if normalized_energy is not None else None,
         "duration_fit": round(duration_fit, 4),
+        "opening_speech": round(opening_speech, 4) if opening_speech is not None else None,
+        "opening_emphasis": round(opening_emphasis, 4) if opening_speech is not None else None,
+        "opening_motion": round(opening_motion, 4) if opening_motion is not None else None,
     }
     parts: list[tuple[float, float]] = []
     if tokens:
@@ -443,6 +465,8 @@ def _candidate_score(
             (0.12, emphasis_score),
             (0.12, boundary_score),
             (0.10, boundary_alignment),
+            (0.45, opening_speech or 0.0),
+            (0.12, opening_emphasis),
         ])
         if confidence is not None:
             parts.append((0.06, confidence))
@@ -450,6 +474,8 @@ def _candidate_score(
         parts.append((0.45, visual_motion))
         parts.append((0.20, visual_scene_changes))
         parts.append((0.10, visual_cut_alignment))
+    if not tokens and opening_motion is not None:
+        parts.append((0.25, opening_motion))
     if energy is not None and tokens:
         # Loudness is only a small supporting cue when speech is present.
         parts.append((0.05, normalized_energy or 0.0))
@@ -483,6 +509,17 @@ def rank_candidates(
         return []
     normalized = _normalize_words(words)
     boundaries = find_sentence_boundaries(normalized)
+    speech_openings = set()
+    previous_end = 0.0
+    previous_text = ""
+    for word in normalized:
+        onset = word["start"]
+        gap = onset - previous_end
+        if not previous_text or gap >= 0.45 or (gap >= 0.08 and _SENTENCE_END_RE.search(previous_text)):
+            # Keep a breath of lead-in without dragging in the preceding sentence.
+            speech_openings.add(max(previous_end, onset - 0.12))
+        previous_end = max(previous_end, word["end"])
+        previous_text = word["text"]
     valid_targets = [float(t) for t in target_durations if float(t) > 0]
     if not valid_targets:
         valid_targets = [min(30.0, duration)]
@@ -515,6 +552,7 @@ def rank_candidates(
         step = max(1.0, min(5.0, clip_length / 4.0))
         starts = set(float(i) for i in np.arange(0.0, last_start + 0.001, step))
         starts.add(last_start)
+        starts.update(start for start in speech_openings if start <= last_start)
         # Include windows anchored around sentence endings, in addition to the grid.
         for boundary in boundaries:
             starts.add(min(last_start, max(0.0, boundary - clip_length * 0.75)))
@@ -595,6 +633,7 @@ def _decode_video_frame(
     timestamp: float,
     *,
     ffmpeg_path: str,
+    frame_size: tuple[int, int] = (320, 180),
     cancellation_callback: Callable[[], bool] | None = None,
 ) -> Any:
     """Decode one bounded-size BGR frame using FFmpeg's restricted local input."""
@@ -603,23 +642,24 @@ def _decode_video_frame(
         import numpy as np
     except ImportError as exc:
         raise AnalysisError("Video analysis requires numpy") from exc
+    width, height = frame_size
     result = _run_process(
         [
             ffmpeg_path, "-v", "error", "-nostdin", "-ss", str(max(0.0, timestamp)),
             *_safe_input_options(), "-i", str(path),
             "-frames:v", "1", "-an", "-sn", "-dn",
-            "-vf", "scale=320:180:force_original_aspect_ratio=decrease,"
-            "format=pix_fmts=bgr24,pad=320:180:(ow-iw)/2:(oh-ih)/2",
+            "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"format=pix_fmts=bgr24,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
             "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1",
         ],
         cancellation_callback=cancellation_callback,
     )
     if not result.stdout:
         return None
-    expected_size = 320 * 180 * 3
+    expected_size = width * height * 3
     if len(result.stdout) != expected_size:
         raise AnalysisError("FFmpeg returned a malformed video frame")
-    return np.frombuffer(result.stdout, dtype=np.uint8).reshape((180, 320, 3))
+    return np.frombuffer(result.stdout, dtype=np.uint8).reshape((height, width, 3))
 
 
 def _sample_geometry(source_width, source_height, frame_width, frame_height):
@@ -759,10 +799,9 @@ def discover_facecam(
 ) -> dict[str, Any]:
     """Suggest a source-pixel webcam crop using faces as seeds for visible edges.
 
-    On success, ``box`` is the webcam region or a roomy estimate, distinguished
-    by ``framing`` (``webcam_boundary`` or ``face_fallback``). ``face_box`` is
-    the representative face and ``confidence`` describes YuNet, not the
-    boundary. If no reliable seed exists, ``box`` is None; set a manual crop.
+    ``box`` is the estimated webcam boundary, or None when uncertain.
+    ``face_box`` is only diagnostic; ``confidence`` describes YuNet, not
+    the boundary.
     """
     fallback = {"detected": False, "box": None, "confidence": 0.0}
     if not yunet_model_path:
@@ -775,7 +814,7 @@ def discover_facecam(
         import cv2
     except ImportError:
         return {**fallback, "reason": "opencv_unavailable"}
-    from .framing import frame_rectangles, roomy_face_box, stable_rectangle
+    from .framing import frame_rectangles, stable_rectangle, temporal_rectangle
 
     if duration is None or not source_width or not source_height:
         media = probe_media(
@@ -795,6 +834,7 @@ def discover_facecam(
         raise AnalysisError(f"Could not initialize YuNet face detector: {exc}") from exc
     count = min(32, max(1, int(sample_count)))
     timestamps = [duration * (index + 0.5) / count for index in range(count)]
+    temporal_times = set(timestamps[::max(1, math.ceil(count / 8))])
     cuts = sorted(max(0.0, float(boundary)) for boundary in shot_boundaries)
     if len(cuts) > 32:
         cuts = [cuts[round(i * (len(cuts) - 1) / 31)] for i in range(32)]
@@ -803,11 +843,13 @@ def discover_facecam(
     timestamps = sorted({value for value in timestamps if value < duration} or {0.0})
     detections = []
     observations = []
+    temporal_frames = []
     decoded_samples = 0
     for sample, timestamp in enumerate(timestamps):
         _check_cancelled(cancellation_callback)
         frame = _decode_video_frame(
             media_path, timestamp, ffmpeg_path=ffmpeg_path,
+            frame_size=(640, 360),
             cancellation_callback=cancellation_callback,
         )
         if frame is None:
@@ -815,6 +857,9 @@ def discover_facecam(
         decoded_samples += 1
         height, width = frame.shape[:2]
         px, py, sw, sh = _sample_geometry(source_width, source_height, width, height)
+        unpadded = frame[py:py + sh, px:px + sw]
+        if timestamp in temporal_times:
+            temporal_frames.append(unpadded)
         detector.setInputSize((width, height))
         _, faces = detector.detect(frame)
         if faces is None:
@@ -836,13 +881,8 @@ def discover_facecam(
             if confidence >= 0.7:
                 sample_detections.append(detection)
                 seeds.append((x - px, y - py, w, h))
-        for score, (left, top, right, bottom), index in frame_rectangles(
-            frame[py:py + sh, px:px + sw], seeds,
-        ):
-            observations.append((
-                score, (left + px, top + py, right + px, bottom + py),
-                sample, sample_detections[index],
-            ))
+        for score, rect, index in frame_rectangles(unpadded, seeds):
+            observations.append((score, rect, sample, sample_detections[index]))
     if not detections:
         return {**fallback, "reason": "no_face_detected"}
 
@@ -861,14 +901,17 @@ def discover_facecam(
             "timestamp": round(median(d["timestamp"] for d in group), 3),
         }
 
-    webcam = stable_rectangle(observations, decoded_samples)
-    if webcam is not None:
+    def webcam_result(webcam):
         (left, top, right, bottom), group = webcam
         region = _map_padded_box_to_source(
-            {"x": left, "y": top, "width": right - left, "height": bottom - top},
+            {"x": left + px, "y": top + py, "width": right - left, "height": bottom - top},
             source_width, source_height, frame_width=width, frame_height=height,
         )
         return {**summary(group), "box": region, "framing": "webcam_boundary"}
+
+    webcam = stable_rectangle(observations, decoded_samples)
+    if webcam is not None:
+        return webcam_result(webcam)
 
     def iou(left: Mapping[str, Any], right: Mapping[str, Any]) -> float:
         a, b = left["box"], right["box"]
@@ -904,10 +947,17 @@ def discover_facecam(
             "best_confidence": round(best_confidence, 4),
         }
     result = summary(stable)
+    if len(stable) >= math.ceil(decoded_samples * 0.6):
+        face = result["face_box"]
+        seed = (face["x"] * sw / source_width, face["y"] * sh / source_height,
+                face["width"] * sw / source_width, face["height"] * sh / source_height)
+        webcam = temporal_rectangle(temporal_frames, seed, observations)
+        if webcam is not None:
+            return webcam_result(webcam)
     return {
         **result,
-        "box": roomy_face_box(result["face_box"], source_width, source_height),
-        "framing": "face_fallback",
+        "detected": False,
+        "box": None,
         "reason": "webcam_boundary_uncertain",
     }
 
@@ -1008,10 +1058,9 @@ def analyze_media(
         if media["video_available"]
         else {"detected": False, "box": None, "confidence": 0.0, "reason": "no_video"}
     )
-    if facecam.get("framing") == "face_fallback":
+    if facecam.get("reason") == "webcam_boundary_uncertain":
         warnings.append(
-            "No stable webcam boundary was found. The suggested framing is based on the face only; "
-            "review or set the face crop manually."
+            "A face was found, but the webcam boundary is uncertain. Set the webcam crop manually."
         )
     return {
         "status": status,
