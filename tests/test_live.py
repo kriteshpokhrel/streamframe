@@ -551,6 +551,7 @@ def test_jobstore_live_hls_analyze_and_export(tmp_path, monkeypatch, media_segme
             # Render a real caption in a nonzero source-time window.
             store.edit(job_id, candidate["id"], {
                 "start": 0.4, "end": 1.8,
+                "face_crop": {"x": 0.0, "y": 0.0, "width": 0.4, "height": 0.4},
                 "words": [{"start": 0.6, "end": 1.5, "text": "Local timebase"}],
             })
             store.export(job_id, candidate["id"])

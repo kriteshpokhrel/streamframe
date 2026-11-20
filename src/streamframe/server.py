@@ -24,6 +24,10 @@ POST /api/jobs {"source":{"type":"file","path":"/absolute/video.mp4"}}
   Windows without a confident or manual face crop skip automatic export, but
   retain the candidate window for manual correction. Published rolling clips
   retain their source window for editing and re-export.
+  Automatic publication additionally requires verified source video dimensions
+  of at least 720 pixels on the shorter edge. Lower-resolution windows have
+  status=low_quality, source_width/source_height and a warning; their candidate
+  remains available for manual review/export (no upscaling to pass this gate).
   YouTube identities must be explicit @handles or channel URLs. Auto picks live
   first, then latest finished archive; live and latest force one selection.
   Live uses duration only; optional start/end apply to VOD selection. Omitted
@@ -46,6 +50,12 @@ PATCH /api/jobs/{id}/live-crop {"face_crop":normalized rectangle or null} -> Job
 POST /api/jobs/{id}/candidates/{candidate_id}/export (no body) -> 202 Job
 GET /api/jobs/{id}/media -> imported video bytes, including HTTP Range support
 GET /api/jobs/{id}/exports/{filename} -> MP4 attachment
+DELETE /api/jobs/{id}/exports/{filename} -> 204; removes only that published export
+DELETE /api/jobs/{id}/exports -> 204; removes published exports for that source only
+POST /api/jobs optionally accepts auto_export: {title?: string | null} alongside source.
+  Exports the two highest-scored moments with usable framing in that selection.
+  An omitted or blank title uses the imported video title or local filename.
+  An explicit null exports without an opening title.
 Job: id, source, status, stage, progress, candidates, exports, media_url, error,
   operation ("analyze"|"export"), export_candidate_id, created_at, updated_at;
   timestamps are Unix seconds, error/media_url/export_candidate_id nullable.
@@ -58,15 +68,26 @@ Job: id, source, status, stage, progress, candidates, exports, media_url, error,
   cancelling/cancelled/failed/succeeded/interrupted; restart requires resume.
 Candidate: id (immutable string), start, end, score (finite number), evidence
   (list of strings), words (list of {start,end,text,correction?:string}),
-  face_crop, content_crop (null or normalized {x,y,width,height}).
+  face_crop, content_crop (null or normalized {x,y,width,height}), optional
+  opening_title (up to 60 characters; empty disables it).
+  For imported sources, face_crop applies to all candidates on the job.
 Export: {candidate_id,filename,url}. Edits and exports return the whole Job.
 Missing resources: 404; invalid JSON/schema/source: 422; busy/state conflict:
 409; unsafe peer/Host/Origin: 403; non-JSON mutation payload: 415; body >1MiB: 413.
 Remote retrieval is unauthenticated, with pinned public DNS at every connection
 including redirects. Ended Twitch VODs require plain MPEG-TS HLS and fetch only
 overlapping segments (max 512 MiB/1200 segments/10 minutes); supported YouTube
-archives additionally require a verified complete timeline. Unsupported or
-encrypted formats, DASH and direct MP4 fail without full-download fallback.
+archives additionally require a verified complete timeline. YouTube video
+links may use full_video=true instead of start/end for a finished video up
+to 300 seconds; compatible MP4 and split MP4/WebM tracks are allowed for those whole-video
+requests. Partial ranges never fall back to a full download.
+YouTube VOD imports must verify at 720p or better before publishing the local
+source. The legacy require_hd boolean is still accepted on explicit full-video
+requests but no longer changes this requirement. Whole-video selection tries
+compatible HD alternatives with at most 12 track requests under the same byte
+and deadline limits. If the CDN rejects a whole-track request, the importer can
+assemble that track from validated byte ranges, with a separate shared cap of
+160 range requests. HD HLS resolution tries at most 12 compatible manifests.
 Full local imports are limited to 2GiB.
 Range imports can seek into larger regular files without copying them first;
 the generated H.264 MP4 must be under 2GiB and finish within 15 minutes.
@@ -197,8 +218,10 @@ def create_app(data_dir=None, import_roots=None, analyzer=None, renderer=None):
     @app.post("/api/jobs", status_code=202)
     async def create_job(request: Request):
         payload = await body(request)
-        if set(payload) != {"source"}:
-            raise HTTPException(422, "Expected exactly one source field")
+        if "source" not in payload or set(payload) - {"source", "auto_export"}:
+            raise HTTPException(422, "Expected source and optional auto_export")
+        if "auto_export" in payload:
+            return await invoke(request, "create", payload["source"], payload["auto_export"])
         return await invoke(request, "create", payload["source"])
 
     @app.get("/api/jobs/{job_id}")
@@ -248,6 +271,16 @@ def create_app(data_dir=None, import_roots=None, analyzer=None, renderer=None):
     async def export_file(job_id: str, filename: str, request: Request):
         path = await invoke(request, "media_path", job_id, filename)
         return FileResponse(path, media_type="video/mp4", filename=filename)
+
+    @app.delete("/api/jobs/{job_id}/exports/{filename}", status_code=204, response_class=Response)
+    async def delete_export(job_id: str, filename: str, request: Request):
+        await invoke(request, "delete_export", job_id, filename)
+        return Response(status_code=204)
+
+    @app.delete("/api/jobs/{job_id}/exports", status_code=204, response_class=Response)
+    async def delete_exports(job_id: str, request: Request):
+        await invoke(request, "delete_exports", job_id)
+        return Response(status_code=204)
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend.is_dir():

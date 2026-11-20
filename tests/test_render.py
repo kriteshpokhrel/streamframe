@@ -2,6 +2,7 @@ import json
 import http.server
 import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import threading
 import unittest
 import uuid
@@ -54,6 +55,25 @@ class CaptionTests(unittest.TestCase):
         ]:
             with self.subTest(word=word), self.assertRaises(ValueError):
                 render._words([word], 0, 1)
+
+    def test_opening_title_uses_clip_time_and_treats_text_as_literal(self):
+        ass = render._ass([], r"{\p1}The setup\N", 1.65)
+        self.assertIn("Dialogue: 1,0:00:00.00,0:00:01.65,Opening", ass)
+        self.assertIn(rf"\pos(540,{render.WEBCAM_HEIGHT + 5})", ass)
+        self.assertIn("｛＼p1｝The setup＼N", ass)
+        self.assertNotIn(r"{\p1}", ass)
+        self.assertIn("0:00:02.40,Opening", render._ass([], "A short hook", 30))
+
+    def test_captions_keep_fixed_phrases_and_do_not_reveal_phrases_across_a_pause(self):
+        ass = render._ass([(0, 0.3, "First"), (0.32, 0.7, "phrase"), (2.8, 3.2, "Later")])
+        first, second, later = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertIn(r"{\c&H00FFFF&}First{\c&HFFFFFF&} phrase", first)
+        self.assertIn(r"First {\c&H00FFFF&}phrase{\c&HFFFFFF&}", second)
+        self.assertNotIn("Later", first)
+        self.assertNotIn("Later", second)
+        self.assertIn("0:00:00.32,0:00:00.70", second)
+        self.assertIn("0:00:02.80,0:00:03.20", later)
+        self.assertNotIn("phrase", later)
 
     def test_render_command_uses_safe_subtitle_basename_and_preserves_audio(self):
         output = ROOT / f"capture-{uuid.uuid4().hex}.mp4"
@@ -180,10 +200,14 @@ class FFmpegTests(unittest.TestCase):
         self.assertEqual({s["codec_name"] for s in info["streams"]}, {"h264", "aac"})
         pixels = subprocess.check_output([
             "ffmpeg", "-v", "error", "-i", str(self.output), "-frames:v", "1",
-            "-vf", "scale=2:2", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
+            "-vf", "crop=2:2:540:360", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
         ])
         self.assertGreater(pixels[0], pixels[2] + 100)
-        self.assertGreater(pixels[8], pixels[6] + 100)
+        screen = subprocess.check_output([
+            "ffmpeg", "-v", "error", "-i", str(self.output), "-frames:v", "1",
+            "-vf", "crop=2:2:540:740", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
+        ])
+        self.assertGreater(screen[2], screen[0] + 100)
         data = self.output.read_bytes()
         self.assertLess(data.index(b"moov"), data.index(b"mdat"))
 
@@ -195,6 +219,108 @@ class FFmpegTests(unittest.TestCase):
         self.assertEqual(self.output.read_bytes(), original)
         with self.assertRaises(ValueError):
             self.render(max_output_bytes=True)
+
+    def test_branded_render_replays_blurred_footage_without_repeating_audio(self):
+        with TemporaryDirectory() as work:
+            brand = Path(work)
+            for name, color in (("watermark", "white@0.8"), ("outro", "magenta")):
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-f", "lavfi", "-i", f"color={color}:s=80x80,format=rgba",
+                    "-frames:v", "1", "-threads", "1", "-update", "1", str(brand / f"{name}.png"),
+                ], check=True)
+            self.render(brand_dir=brand)
+
+        def pixels(time):
+            return subprocess.check_output([
+                "ffmpeg", "-v", "error", "-ss", str(time), "-i", str(self.output),
+                "-frames:v", "1", "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ])
+
+        def pixel(frame, x, y):
+            offset = (y * 1080 + x) * 3
+            return frame[offset:offset + 3]
+
+        duration = subprocess.check_output([
+            "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration",
+            "-of", "csv=p=0", str(self.output),
+        ], text=True)
+        self.assertAlmostEqual(float(duration), 1.9, places=5)
+
+        main, outro, settled = pixels(0), pixels(0.5), pixels(1.7)
+        red, _, blue = pixel(main, 540, 360)
+        self.assertGreater(red, blue + 100)
+        padding = pixel(main, 20, 200)
+        self.assertTrue(all(abs(value - expected) < 6 for value, expected in zip(padding, (20, 28, 34))))
+        red, green, blue = pixel(main, 100, 732)
+        self.assertGreater(red, 180)
+        self.assertGreater(blue, green + 35)
+        marked = pixel(main, 460, 794)
+        clean = pixel(main, 420, 794)
+        self.assertGreater(marked[0], clean[0] + 60)
+        self.assertLess(marked[0], clean[0] + 150)
+        self.assertGreater(pixel(outro, 540, 960)[0], 200)
+        early_background = pixel(pixels(0.43), 540, 360)
+        late_background = pixel(settled, 540, 360)
+        self.assertGreater(early_background[0], late_background[0] + 8)
+        self.assertGreater(late_background[1], early_background[1] + 4)
+        self.assertLess(max(pixel(outro, 100, 800)), 130)
+        for y in (1310, 1390, 1470):
+            self.assertTrue(any(min(pixel(settled, x, row)) > 200
+                                for x in range(422, 760) for row in range(y - 20, y + 20)))
+        self.assertLess(max(pixel(outro, 358, 1470)), 60)
+        self.assertGreater(min(pixel(settled, 358, 1470)), 200)
+        self.assertLess(max(pixel(settled, 371, 1470)), 60)
+        self.assertGreater(min(pixel(settled, 352, 1310)), 200)
+        self.assertGreater(min(pixel(settled, 380, 1298)), 180)
+        self.assertLess(max(pixel(settled, 371, 1310)), 60)
+        from array import array
+        peaks = []
+        for start in (0.15, 0.38, 0.46, 1.7):
+            audio = array("h", subprocess.check_output([
+                "ffmpeg", "-v", "error", "-ss", str(start), "-i", str(self.output),
+                "-t", "0.015", "-map", "0:a", "-f", "s16le", "-",
+            ]))
+            self.assertTrue(audio)
+            peaks.append(max(map(abs, audio)))
+        main_peak, fading_peak, early_outro, late_outro = peaks
+        self.assertGreater(main_peak, 100)
+        self.assertLess(0, fading_peak)
+        self.assertLess(fading_peak, main_peak * 0.4)
+        self.assertLess(max(early_outro, late_outro), 10)
+
+    def test_branded_title_shows_inset_badge_and_never_extends_into_outro(self):
+        with TemporaryDirectory() as work:
+            brand = Path(work)
+            for name in ("watermark", "outro"):
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-f", "lavfi", "-i", "color=magenta:s=80x80",
+                    "-frames:v", "1", "-threads", "1", "-update", "1", str(brand / f"{name}.png"),
+                ], check=True)
+            self.render(brand_dir=brand, opening_title="iShowSpeed meets a Hulk-like monster in GTA 6",
+                        include_audio=False)
+
+        def pixel_at(time, x, y):
+            return subprocess.check_output([
+                "ffmpeg", "-v", "error", "-ss", str(time), "-i", str(self.output),
+                "-frames:v", "1", "-vf", f"crop=2:2:{x}:{y}", "-threads", "1",
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ])[:3]
+
+        red, green, blue = pixel_at(0.1, 150, 700)
+        self.assertGreater(min(red, blue), green + 120)
+        red, green, blue = pixel_at(0.1, 280, 700)
+        self.assertGreater(blue, red + 40)
+        red, green, blue = pixel_at(0.45, 150, 700)
+        self.assertLess(max(red, green, blue), 130)
+        title = subprocess.check_output([
+            "ffmpeg", "-v", "error", "-ss", "0.1", "-i", str(self.output),
+            "-frames:v", "1", "-vf", "crop=680:160:280:650",
+            "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+        ])
+        rows = [y for y in range(160) if sum(
+            min(title[offset:offset + 3]) > 220 for offset in range(y * 2040, (y + 1) * 2040, 3)
+        ) > 5]
+        self.assertGreaterEqual(rows[-1] - rows[0], 76)
 
     def test_wide_webcam_preserves_both_edges_with_padding(self):
         source = ROOT / f"webcam-edges-{uuid.uuid4().hex}.mp4"
@@ -217,7 +343,7 @@ class FFmpegTests(unittest.TestCase):
             left, right, padding = pixel(20, 480), pixel(1050, 480), pixel(500, 20)
             self.assertGreater(left[1], left[0] + 50)
             self.assertGreater(right[2], right[0] + 100)
-            self.assertLess(max(padding), 20)
+            self.assertLess(max(padding), 45)
         finally:
             source.unlink(missing_ok=True)
 
