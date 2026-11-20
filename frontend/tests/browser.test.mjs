@@ -511,6 +511,12 @@ test(`real browser import/edit/crop/export/cancel (${realAnalysis ? 'real local 
       return route.abort();
     });
     await page.goto(origin);
+    const navigation = page.getByRole('navigation', { name: 'Workspace sections' });
+    assert.equal(await navigation.getByRole('link', { name: 'Add video' }).getAttribute('href'), '#add-video');
+    assert.equal(await navigation.getByRole('link', { name: /Sources/ }).getAttribute('href'), '#source-library');
+    assert.equal(await navigation.getByRole('link', { name: /Exports/ }).getAttribute('href'), '#exported-videos');
+    assert.equal(await page.getByRole('list', { name: 'How it works' }).getByRole('listitem').count(), 3);
+    assert.equal(await page.getByText('Twitch works best.', { exact: false }).isVisible(), true);
     assert.equal(await page.getByLabel('What would you like to add?', { exact: true }).inputValue(), 'streamer');
     assert.equal(await page.getByLabel('Platform', { exact: true }).isVisible(), false, 'Less-used options start collapsed');
     await page.getByText(/^Capture options ·/).click();

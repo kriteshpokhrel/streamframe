@@ -10,10 +10,68 @@ sessions can render clips automatically, but they do not publish them.
 The launcher is `./streamframe` from the checkout; the editor is at
 <http://127.0.0.1:8765>.
 
-[Demo video](demo/streamframe-demo.mp4) · [Still](demo/streamframe-demo.png).
+[Demo video](demo/streamframe-demo.mp4) · [Webcam framing example](demo/webcam-region-fit.png).
 The demo composites a licensed portrait and synthetic content with timed
 demonstration captions over a generated tone. It is not streamer footage or a
 test of speech recognition.
+
+## Quick start
+
+StreamFrame runs locally; it does not post clips or require a paid API. You
+need Python 3.10, Node.js 22, and FFmpeg/ffprobe with `libx264`, AAC and the
+`ass` filter. macOS and Linux use the shell commands below; a compatible FFmpeg
+build must already be installed. See [START.md](START.md) for capability checks,
+other operating-system details, and troubleshooting.
+
+```sh
+git clone https://github.com/kriteshpokhrel/streamframe.git
+cd streamframe
+python3.10 -m venv .venv
+.venv/bin/python -m pip install 'pip==25.3'
+.venv/bin/python -m pip install -r requirements.lock
+.venv/bin/python -m pip install --no-deps -e .
+npm --prefix frontend ci
+npm --prefix frontend run build
+```
+
+Transcription also needs the Whisper `small` model in the local Hugging Face
+cache, or a model directory set through `STREAMFRAME_WHISPER_MODEL`.
+StreamFrame does not download the model implicitly. If you choose to download
+it, this one-time command requires internet access and disk space:
+
+```sh
+.venv/bin/python -c 'from huggingface_hub import snapshot_download; snapshot_download("Systran/faster-whisper-small")'
+```
+
+Once the model is available, start the app:
+
+```sh
+./streamframe
+```
+
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), add a supported source,
+review a suggested moment, adjust the webcam and captions, then export.
+For automated live clips, select **Live now only** and **Make clips
+automatically for a bounded session** under Capture options. Finished exports
+appear in **Exported videos**. Obtain the creator's permission before sharing.
+
+**Handing setup to an agent?** Give it [START.md](START.md); it includes
+explicit setup permissions, verification, privacy limits, and recovery steps.
+
+## Source support
+
+| Source | Current support |
+| --- | --- |
+| Twitch channel | Live capture or latest finished archive when a compatible public HLS stream is available. |
+| Twitch video | A selected range of a compatible finished HLS archive. |
+| YouTube channel or live link | Public live streams with compatible HLS; availability is not guaranteed. |
+| YouTube finished video | Limited to compatible clear, multiplexed MPEG-TS HLS with a complete verified timeline. Most YouTube recordings are not supported. |
+| Local file | A backend-readable file or selected range, subject to the configured import roots. |
+
+Remote media is retrieved and cached automatically within the documented
+limits. Private or protected videos, separate HLS audio, encrypted streams,
+YouTube DASH and direct MP4 URLs are not supported; there is no silent
+whole-video download fallback.
 
 ## What to expect
 

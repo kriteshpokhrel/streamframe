@@ -265,16 +265,27 @@ export default function App() {
           event.preventDefault();
           if (canLeave()) window.location.reload();
         }}><span className="brand-icon" aria-hidden="true">▥</span> StreamFrame <span className="tag">LOCAL</span></a>
+        <nav className="topnav" aria-label="Workspace sections">
+          <a href="#add-video">Add video</a>
+          <a href="#source-library">Sources <span>{jobs.length}</span></a>
+          <a href="#exported-videos">Exports <span>{gallery.length}</span></a>
+        </nav>
         <span className={`connection ${online === false ? 'offline' : ''}`}>
           <span aria-hidden="true">●</span> {online === null ? 'Connecting' : online ? 'Backend connected' : 'Backend unavailable'}
         </span>
       </header>
       <main>
         <section className="intro">
-          <div><p className="eyebrow">YOUR CONTENT, REFRAMED</p><h1>Find the moment.<br /><span>Make it yours.</span></h1>
-            <p className="muted">Start with a streamer or video link. Inspect source evidence, then edit your clips on a shared timeline.</p></div>
-          <form className="import-card" onSubmit={(event) => void importSource(event)}>
-            <h2>Add a video</h2>
+          <div className="intro-copy"><p className="eyebrow">YOUR LOCAL CLIPPING WORKSPACE</p><h1>Find the moment.<br /><span>Make it yours.</span></h1>
+            <p className="muted">Turn a supported stream or video into a vertical clip, with your webcam and captions in view.</p>
+            <ol className="workflow-steps" aria-label="How it works">
+              <li><span>01</span><div><strong>Add a source</strong><small>Choose a channel, video range, or file.</small></div></li>
+              <li><span>02</span><div><strong>Review the moments</strong><small>Adjust your framing and captions.</small></div></li>
+              <li><span>03</span><div><strong>Export your clip</strong><small>Preview and download when ready.</small></div></li>
+            </ol>
+          </div>
+          <form id="add-video" className="import-card" onSubmit={(event) => void importSource(event)}>
+            <div className="import-heading"><div><p className="eyebrow">START HERE</p><h2>Add a video</h2></div><span className="import-badge">Local processing</span></div>
             <label className="field import-type">What would you like to add?<select aria-label="What would you like to add?" value={sourceType} onChange={(event) => {
               setSourceType(event.target.value as typeof sourceType); setSource(''); setRangeStart(''); setRangeEnd('');
             }} disabled={busy || editorBusy}><option value="streamer">A streamer or channel — name or live link</option><option value="url">Part of a finished video — link + times</option><option value="file">A file on this computer — optional</option></select></label>
@@ -319,8 +330,9 @@ export default function App() {
                 value={rangeEnd} onChange={(event) => setRangeEnd(event.target.value)} disabled={busy || editorBusy} placeholder="End of file" /></label>
               <p className="muted small">Up to 30 minutes. {sourceType === 'url' ? 'Both times are required.' : 'Leave times empty for the full file; start-only takes up to 30 minutes or end of file.'} Enter seconds from the original video. Editor times start at 0 for the part you import.</p>
             </div>}
-            <p className="muted small">Works best with Twitch. YouTube live requires supported public HLS. Finished YouTube ranges work only for public, clear, muxed MPEG-TS HLS with a complete verified timeline; only the selected segments are fetched. Most YouTube VOD formats are unsupported. Post-live processing (post_live) is unavailable. No DASH/MP4 fallback, cookies, sign-in, or access-control bypass is provided. Channel resolution and playback can fail. A previously failed video is not guaranteed to work.</p>
+            <p className="source-note">Twitch works best. Most YouTube recordings are not supported yet; live sources also require a compatible public stream.</p>
             <details className="import-settings"><summary>Limits & supported formats</summary>
+              <p className="muted small">YouTube live requires supported public HLS. Finished YouTube ranges work only for public, clear, muxed MPEG-TS HLS with a complete verified timeline; only the selected segments are fetched. Post-live processing is unavailable. There is no DASH/MP4 fallback, sign-in, or access-control bypass.</p>
               <p className="muted small">Retrieval supports guarded HLS streams, not every provider or video format. Unsupported sources fail instead of silently downloading an entire video.</p>
               <p className="muted small">Live sessions: 512 MiB transferred and 512 MiB combined temporary/output disk. Finished videos: 512 MiB / 1200 segments / 10-minute retrieval deadline, output below 2 GiB. Reaching a limit can stop the job; continuous coverage is not guaranteed.</p>
             </details>
@@ -331,7 +343,7 @@ export default function App() {
         {pollError && <div className="notice warning" role="status">Unable to refresh: {pollError} <span>Retrying automatically.</span></div>}
         <ExportLibrary jobs={libraryJobs} files={gallery} busy={busy || editorBusy} onEdit={editExport} />
         <div className="workspace">
-          <aside className="sidebar panel" aria-label="Imported jobs">
+          <aside id="source-library" className="sidebar panel" aria-label="Imported jobs">
             <div className="section-heading"><h2>Source library</h2><span className="count">{jobs.length}</span></div>
             {loading ? <p className="muted">Loading jobs…</p> : !jobs.length ? <p className="muted empty">Your imported videos will appear here.</p> : null}
             <div className="job-list">{jobs.map((item) => (
@@ -467,7 +479,7 @@ function ExportLibrary({ jobs, files, busy, onEdit }: {
     if (active.length) return active.map((candidate) => ({ job, candidate }));
     return job.status === 'exporting' ? [{ job, candidate: undefined }] : [];
   });
-  return <section className="export-library panel" aria-label="Exported videos">
+  return <section id="exported-videos" className="export-library panel" aria-label="Exported videos">
     <div className="section-heading"><div><p className="eyebrow">FINISHED OUTPUTS</p><h2>Exported videos <span className="count">{files.length}</span></h2></div>
       <label className="field">Show exports from<select aria-label="Show exports from" value={filter} onChange={(event) => setFilter(event.target.value)}>
         <option value="all">All sources</option>{jobs.map((job) =>
