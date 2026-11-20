@@ -157,10 +157,11 @@ class RealFaceIntegrationTests(unittest.TestCase):
             detector = cv2.FaceDetectorYN.create(str(MODEL), "", (1080, 960), 0.6, 0.3, 5000)
             _, faces = detector.detect(cv2.cvtColor(first[:960], cv2.COLOR_RGB2BGR))
             self.assertIsNotNone(faces, "face is missing from rendered top panel")
-            expected_x = (box["x"] - x) * 1080 / width
-            expected_y = (box["y"] - y) * 960 / height
-            expected_w = box["width"] * 1080 / width
-            expected_h = box["height"] * 960 / height
+            scale = min(1080 / width, 960 / height)
+            expected_x = (1080 - width * scale) / 2 + (box["x"] - x) * scale
+            expected_y = (960 - height * scale) / 2 + (box["y"] - y) * scale
+            expected_w = box["width"] * scale
+            expected_h = box["height"] * scale
             self.assertGreaterEqual(expected_x, 0)
             self.assertGreaterEqual(expected_y, 0)
             self.assertLessEqual(expected_x + expected_w, 1080)
