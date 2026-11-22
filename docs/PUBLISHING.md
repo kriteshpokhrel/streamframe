@@ -95,6 +95,40 @@ YouTube and TikTok accept the file bytes and never touch this.
 | Access and refresh tokens | `<state dir>/credentials.json` (0600) | per machine, rotates constantly |
 | Publication history | `<state dir>/publications.sqlite3` | idempotency ledger |
 
+### Sharing configuration with a teammate
+
+`.env` carries app registrations and choices, not credentials for posting.
+Copying it to another machine is enough to *configure* publishing, but that
+machine must still authorize itself:
+
+| Travels in `.env` | Does not travel |
+| --- | --- |
+| Client IDs and secrets | OAuth tokens (`credentials.json`) |
+| Platform selection, privacy default | The publish ledger |
+| Media host and expiry | Anything already published |
+| `STREAMFRAME_INSTAGRAM_PAGE_ID` (account-specific, not machine-specific) | |
+
+Practical steps for a collaborator:
+
+1. Copy `.env` and `chmod 600 .env`. Never commit it.
+2. Install as usual (Python 3.10, Node 22, FFmpeg with `libx264`, AAC and
+   `libass`). Publishing adds no dependency of its own.
+3. Run `./streamframe publish doctor` — it will list every platform as needing
+   authorization, which is expected.
+4. Run `./streamframe publish auth <platform>` once per platform, using the
+   redirect URI already registered in the shared developer app.
+5. `STREAMFRAME_PUBLISH_STATE_DIR` uses `~`, so it resolves per machine; tokens
+   and the ledger land in that machine's home directory.
+
+Two people publishing from two machines both authorize separately, and each keeps
+its own ledger. That means the same file could be posted once per machine. Share
+one state directory (or check `publish status`) if that matters; do not share the
+tokens themselves.
+
+If the collaborator publishes to a **different** brand, change
+`STREAMFRAME_INSTAGRAM_PAGE_ID` to that Page, or leave it empty and let
+`me/accounts` pick it up.
+
 ## Platform setup
 
 Each platform needs a developer app. All of them want a privacy policy URL; a
