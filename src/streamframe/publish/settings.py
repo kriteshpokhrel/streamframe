@@ -197,6 +197,9 @@ class Settings:
     media: MediaSettings = field(default_factory=MediaSettings)
     http_timeout: float = 120.0
     poll_timeout: float = 300.0
+    # Registered OAuth callback for platforms that cannot use loopback (Meta,
+    # TikTok). Kept here so a copied .env is self-contained for authorization.
+    publish_redirect_uri: str | None = None
 
     @classmethod
     def load(cls, data_dir=None, environ=None):
@@ -268,6 +271,7 @@ class Settings:
             media=media,
             http_timeout=float(_number(environ.get("STREAMFRAME_PUBLISH_HTTP_TIMEOUT"), 120)),
             poll_timeout=float(_number(environ.get("STREAMFRAME_PUBLISH_POLL_TIMEOUT"), 300)),
+            publish_redirect_uri=_text(environ.get("STREAMFRAME_PUBLISH_REDIRECT_URI")),
         )
 
     def problems(self):

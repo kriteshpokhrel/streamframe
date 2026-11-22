@@ -53,13 +53,27 @@ def default_redirect(platform, port=DEFAULT_PORT):
     return ""
 
 
+def redirect_for(settings, platform, redirect_uri=None, port=DEFAULT_PORT):
+    """Explicit flag wins, then the configured callback, then YouTube's loopback.
+
+    Keeping the registered HTTPS callback in configuration means a copied .env
+    is enough to authorize without knowing which URL was registered.
+    """
+    if redirect_uri:
+        return redirect_uri
+    if platform == "youtube":
+        return default_redirect(platform, port)
+    return settings.publish_redirect_uri or ""
+
+
 def authorize(settings: Settings, platform, *, redirect_uri=None, port=DEFAULT_PORT,
               manual=None, session=None, input_fn=input, echo=print):
     session = session or requests
-    redirect_uri = redirect_uri or default_redirect(platform, port)
+    redirect_uri = redirect_for(settings, platform, redirect_uri, port)
     if not redirect_uri:
         raise AuthError(
-            f"{platform} needs your app's registered HTTPS callback. Re-run with "
+            f"{platform} needs your app's registered HTTPS callback. Set "
+            f"STREAMFRAME_PUBLISH_REDIRECT_URI or pass "
             f"--redirect-uri https://your-domain/callback"
         )
     state = secrets.token_urlsafe(24)
