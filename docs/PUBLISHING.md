@@ -20,6 +20,33 @@ Nothing here schedules itself. Either a person runs `publish run`, the editor's
 **Upload to** button calls the API, or `publish_auto` lets the server publish
 each export as it lands.
 
+## Prerequisites
+
+Publishing runs inside StreamFrame, so it inherits the app's requirements. Each
+one is here with the reason it is needed, because a missing piece usually shows
+up as a confusing platform error rather than a clear one.
+
+| Requirement | Why |
+| --- | --- |
+| Python 3.10 | the pinned interpreter; `requirements.lock` targets it |
+| Node.js 22 | builds the editor the launcher serves |
+| FFmpeg with `libx264` | H.264 encoding; the publisher uploads the rendered file |
+| FFmpeg with AAC | the audio track in every export |
+| FFmpeg with `libass` | burned-in captions; rendering fails without it |
+| `ffprobe` beside `ffmpeg` | duration and dimension checks during import and export |
+| Whisper `small` (optional) | word-timed captions; without it clips analyze speech-free |
+| Writable data directory (`~/.streamframe` by default) | jobs, exports, tokens and the ledger |
+| A public HTTPS URL for the OAuth callback | Meta and TikTok reject loopback redirects |
+| No extra Python packages | publishing uses `requests`, already a dependency |
+
+The callback URL needs no server of its own: the authorization code appears in
+the address bar, so any page you control works. A static site is enough — the
+consent pages in this repository are one example.
+
+Each platform issues its own credentials through its own developer console;
+there is no shared registry, which is why setup is per platform rather than one
+sign-up.
+
 ## Quick start
 
 ```sh
@@ -106,6 +133,7 @@ machine must still authorize itself:
 | Client IDs and secrets | OAuth tokens (`credentials.json`) |
 | Platform selection, privacy default | The publish ledger |
 | Media host and expiry | Anything already published |
+| `STREAMFRAME_PUBLISH_REDIRECT_URI` (the registered callback) | |
 | `STREAMFRAME_INSTAGRAM_PAGE_ID` (account-specific, not machine-specific) | |
 
 Practical steps for a collaborator:
@@ -115,10 +143,16 @@ Practical steps for a collaborator:
    `libass`). Publishing adds no dependency of its own.
 3. Run `./streamframe publish doctor` — it will list every platform as needing
    authorization, which is expected.
-4. Run `./streamframe publish auth <platform>` once per platform, using the
-   redirect URI already registered in the shared developer app.
+4. Run `./streamframe publish auth <platform>` once per platform. It uses
+   `STREAMFRAME_PUBLISH_REDIRECT_URI` unless `--redirect-uri` is passed.
 5. `STREAMFRAME_PUBLISH_STATE_DIR` uses `~`, so it resolves per machine; tokens
    and the ledger land in that machine's home directory.
+
+**Authorization needs a human.** `publish auth` prints a URL, waits for a
+browser approval, then asks for the callback URL on stdin. Everything before and
+after that can be automated; this one step cannot, because it exists to prove
+the operator's identity. An agent should run other commands freely, but print the
+URL and stop here rather than trying to script the consent.
 
 Two people publishing from two machines both authorize separately, and each keeps
 its own ledger. That means the same file could be posted once per machine. Share

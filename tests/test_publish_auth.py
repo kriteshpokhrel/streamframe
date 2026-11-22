@@ -80,6 +80,16 @@ def test_facebook_login_finds_the_page_and_its_instagram_account(tmp_path):
     assert record["expires_at"] is None
 
 
+def test_the_configured_redirect_uri_is_used_when_none_is_passed(tmp_path):
+    settings = replace(settings_for(tmp_path, login="facebook"),
+                       publish_redirect_uri="https://example.test/cb")
+
+    assert auth.redirect_for(settings, "instagram") == "https://example.test/cb"
+    assert auth.redirect_for(settings, "instagram", "https://other.test/x") == "https://other.test/x"
+    assert auth.redirect_for(settings, "youtube").startswith("http://127.0.0.1:")
+    assert auth.redirect_for(settings_for(tmp_path), "instagram") == ""
+
+
 def test_a_configured_page_id_skips_discovery(tmp_path):
     session = Session(get_responses=[
         Response(payload={"access_token": "short"}),

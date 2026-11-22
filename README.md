@@ -66,6 +66,8 @@ permission before sharing.
 
 **Handing setup to an agent?** Give it [START.md](START.md); it includes
 explicit setup permissions, verification, privacy limits, and recovery steps.
+For publishing specifically, [AGENTS.md](AGENTS.md#publishing-handover) carries a
+handover prompt and the rules around OAuth consent.
 
 ## Source support
 
