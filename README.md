@@ -4,7 +4,8 @@ StreamFrame is a local video clipping prototype. Give it a supported public
 Twitch or YouTube source, or a file on your computer. It retrieves or copies
 the media, suggests highlights, and lets you
 correct captions and framing before rendering a vertical clip. Rolling live
-sessions can render clips automatically, but they do not publish them.
+sessions can render clips automatically, and can publish them to YouTube,
+Instagram or TikTok through a separate, optional publisher.
 
 **[Start here: setup, browser workflow, and troubleshooting](START.md)**.
 The launcher is `./streamframe` from the checkout; the editor is at
@@ -186,27 +187,37 @@ surface failures instead of blindly resubmitting. Render only from authorized
 sources and keep publishing and destructive cleanup separate from capture.
 The API contract is in [`server.py`](src/streamframe/server.py); job
 submission and export are asynchronous, and an export is not ready just
-because the request was accepted. This repository ships no scheduler. An
-optional publisher is separate from capture and export; see
-[publishing](docs/PUBLISHING.md).
+because the request was accepted. This repository ships no scheduler.
 
-Publishing is configured through a git-ignored `.env` and is safe to re-run:
-each clip publishes once per platform. With `STREAMFRAME_PUBLISH_AUTO=1`, or
-`--auto-publish` on one job, finished exports post themselves — a separate
-worker, not the render pipeline.
+### Publishing
+
+An optional publisher posts finished exports to YouTube, Instagram and TikTok.
+It is a separate package: capture and rendering never wait for a platform, and a
+failed upload is recorded on the job instead of failing the render.
+
+| Platform | Delivery | Human step |
+| --- | --- | --- |
+| YouTube | Short; public, unlisted or private | none |
+| Instagram | Reel | none |
+| TikTok | Draft in the account inbox | publish it in the app |
+
+Upload from **Exports** (one clip) or from **Add source** (automatic, including
+rolling sessions). Both require a title — a filename is never used as one — and
+each clip publishes at most once per platform.
 
 ```sh
 ./streamframe publish setup --write-env    # create .env, show the next step
-./streamframe publish doctor
-./streamframe publish auth youtube
-./streamframe publish run --file exports/clip.mp4 --caption "..."          # dry run
-./streamframe publish run --file exports/clip.mp4 --caption "..." --yes
+./streamframe publish doctor               # exit 0 when nothing is missing
+./streamframe publish auth youtube         # once per platform, per machine
+./streamframe publish run --file exports/clip.mp4 --title "..." --yes
 ./streamframe publish status
 ./streamframe publish refresh
-
-./streamframe submit clip.mp4 --auto-publish        # this source only
-./streamframe streamer name --mode live --rolling --auto-publish
 ```
+
+Configuration is a git-ignored `.env`; OAuth tokens live outside the repository
+in the state directory. See [publishing](docs/PUBLISHING.md) for setup and
+configuration, and [publishing decisions](docs/PUBLISHING-DECISIONS.md) for why
+it is built this way and how to extend it.
 
 ## Development
 
