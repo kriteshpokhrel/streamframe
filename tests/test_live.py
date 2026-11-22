@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 
-from streamframe import jobs, live, sources
+from streamframe import jobs, live, render, sources
 
 
 def playlist(sequence, *items, ended=False):
@@ -562,7 +562,10 @@ def test_jobstore_live_hls_analyze_and_export(tmp_path, monkeypatch, media_segme
             assert export["candidate_id"] == candidate["id"]
             output = probe(store.media_path(job_id, export["filename"]))
             assert float(output["format"]["start_time"]) == pytest.approx(0, abs=0.05)
-            assert float(output["format"]["duration"]) == pytest.approx(1.4, abs=0.08)
+            # Editor exports carry the bundled Lobby Crew preset, so the branded
+            # outro extends the clip past its 1.4-second trim.
+            assert float(output["format"]["duration"]) == pytest.approx(
+                1.4 + render.OUTRO_SECONDS, abs=0.08)
             assert {stream["codec_name"] for stream in output["streams"]} == {"h264", "aac"}
             video = next(stream for stream in output["streams"] if stream["codec_type"] == "video")
             assert (video["width"], video["height"]) == (1080, 1920)

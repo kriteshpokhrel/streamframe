@@ -17,7 +17,9 @@ test of speech recognition.
 
 ## Quick start
 
-StreamFrame runs locally; it does not post clips or require a paid API. You
+StreamFrame runs locally and requires no paid API. Publishing to YouTube,
+Instagram or TikTok is an optional, separate step; see
+[publishing](docs/PUBLISHING.md). You
 need Python 3.10, Node.js 22, and FFmpeg/ffprobe with `libx264`, AAC and the
 `ass` filter. macOS and Linux use the shell commands below; a compatible FFmpeg
 build must already be installed. See [START.md](START.md) for capability checks,
@@ -57,7 +59,9 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765), choose **Add source**,
 and review a suggested moment. Trim the clip, check framing and captions,
 then select **Export clip**. For automated live clips, choose **Clip a channel**,
 **Live now only**, and **Make clips automatically for a bounded session**.
-Finished files appear under **Exports**. Obtain the creator's permission before sharing.
+Finished files appear under **Exports**, where each clip can be downloaded,
+edited, or uploaded to your configured social platforms. Obtain the creator's
+permission before sharing.
 
 **Handing setup to an agent?** Give it [START.md](START.md); it includes
 explicit setup permissions, verification, privacy limits, and recovery steps.
@@ -103,26 +107,43 @@ never fall back to downloading the whole video.
   does not change the audio.
 
 With automatic export enabled in **Add Source**, choose the opening title for
-both clips: **Use video title** (the default, or the filename for a local video),
-**No title**, or **Custom title**. Moments without usable webcam framing stay
-in review.
+the exported clips: **Use video title** (the default, or the filename for a
+local video), **No title**, or **Custom title**. Moments without usable webcam
+framing stay in review. The two highest-ranked moments are exported only when
+they show mostly different footage; if more than half of the shorter clip is
+already covered by the better one, the better clip is exported alone.
 
 ### Lobby Crew export preset
 
-Put `watermark.png` (a transparent wordmark) and `outro.png` (the full logo)
-in `lobby-crew` inside the StreamFrame data directory (`~/.streamframe` by
-default). New exports from the editor for non-rolling jobs use the Lobby
-Crew template automatically. A lavender line separates the full webcam view
-from gameplay; flat dark padding preserves the full webcam view where needed.
-An optional opening title uses a solid violet card with a thin lavender
-outline, centered soft-white text, and an inset logo. A translucent wordmark
-appears centered on the divider when the title clears (or from the start
-without a title). The 1.5-second animated outro includes the Instagram,
-TikTok, and YouTube handles over a blurred replay of the clip ending. The
-clip audio fades briefly at the cut. The outro is silent; it never repeats
-dialogue or adds music.
-The preset does not change trim points or existing MP4s. Remove the preset
-directory to return to unbranded exports. Rolling capture is unchanged.
+The preset ships with the repository in `src/streamframe/assets/lobby-crew`
+(`watermark.png`, a transparent wordmark, and `outro.png`, the full logo), so a
+fresh clone exports branded clips with no extra setup. New exports from the
+editor for non-rolling jobs use the Lobby Crew template automatically. A
+lavender line separates the full webcam view from gameplay; flat dark padding
+preserves the full webcam view where needed. An optional opening title uses a
+solid violet card with a thin lavender outline, centered soft-white text, and
+an inset logo. A translucent wordmark appears centered on the divider when the
+title clears (or from the start without a title). The 1.5-second animated
+outro includes the Instagram, TikTok, and YouTube handles over a blurred
+replay of the clip ending. The clip audio fades briefly at the cut. The outro
+is silent; it never repeats dialogue or adds music.
+
+Burned-in captions end above Instagram's organic bottom margin (319 px), so
+the account row and caption text never cover the last line. Set
+`CAPTION_MARGIN_V` in `render.py` to 672 to stay inside Meta's stricter
+Reels-ad safe area instead. Titles accept up to 90 characters and are split
+into at most three lines, preferring breaks that keep short phrases together.
+The card sits a little above the divider so playback controls and account
+text at the bottom of a phone screen do not crowd the hook. Emoji render
+through the bundled Noto Emoji font in `src/streamframe/assets/fonts`, so the
+hook looks the same on machines without a color emoji font.
+
+To use different artwork without editing the repository, put `watermark.png`
+and `outro.png` in `lobby-crew` inside the StreamFrame data directory
+(`~/.streamframe` by default, or `./.streamframe` when the launcher starts the
+server). That directory overrides the bundled artwork for that machine. The
+handles are fixed in `src/streamframe/render.py`. The preset does not change
+trim points or existing MP4s; rolling capture is unchanged.
 
 ## CLI and local automation
 
@@ -165,8 +186,27 @@ surface failures instead of blindly resubmitting. Render only from authorized
 sources and keep publishing and destructive cleanup separate from capture.
 The API contract is in [`server.py`](src/streamframe/server.py); job
 submission and export are asynchronous, and an export is not ready just
-because the request was accepted. This repository does not configure a
-scheduler or a publishing service.
+because the request was accepted. This repository ships no scheduler. An
+optional publisher is separate from capture and export; see
+[publishing](docs/PUBLISHING.md).
+
+Publishing is configured through a git-ignored `.env` and is safe to re-run:
+each clip publishes once per platform. With `STREAMFRAME_PUBLISH_AUTO=1`, or
+`--auto-publish` on one job, finished exports post themselves — a separate
+worker, not the render pipeline.
+
+```sh
+./streamframe publish setup --write-env    # create .env, show the next step
+./streamframe publish doctor
+./streamframe publish auth youtube
+./streamframe publish run --file exports/clip.mp4 --caption "..."          # dry run
+./streamframe publish run --file exports/clip.mp4 --caption "..." --yes
+./streamframe publish status
+./streamframe publish refresh
+
+./streamframe submit clip.mp4 --auto-publish        # this source only
+./streamframe streamer name --mode live --rolling --auto-publish
+```
 
 ## Development
 

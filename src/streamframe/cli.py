@@ -243,6 +243,21 @@ def _add_follow_options(command, help_text):
     command.add_argument("--interval", type=float, default=2, help="poll interval in seconds")
 
 
+def _add_publish_options(command):
+    command.add_argument("--auto-publish", dest="auto_publish", action="store_true",
+                         default=None,
+                         help="publish finished exports automatically "
+                              "(default: STREAMFRAME_PUBLISH_AUTO)")
+    command.add_argument("--no-auto-publish", dest="auto_publish", action="store_false",
+                         help="never publish this source's exports")
+    command.add_argument("--publish-title", metavar="TEXT",
+                         help="title for automatically published clips (required with --auto-publish)")
+    command.add_argument("--publish-platforms", metavar="LIST",
+                         help="comma-separated platforms for automatic upload")
+    command.add_argument("--publish-privacy", choices=("public", "unlisted", "private"),
+                         help="YouTube visibility for automatic upload")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="streamframe",
@@ -270,6 +285,7 @@ def build_parser():
                         help="range end in source seconds; maximum span is 1800 seconds "
                              "(local --start alone takes up to that span)")
     _add_follow_options(submit, "watch the job until it finishes")
+    _add_publish_options(submit)
     streamer = commands.add_parser(
         "streamer", help="capture a live channel or use its latest finished stream",
         description="Select a Twitch username or channel URL, or a YouTube channel URL or @handle.",
@@ -293,6 +309,7 @@ def build_parser():
     streamer.add_argument("--start", type=float, help="finished stream range start; requires --end")
     streamer.add_argument("--end", type=float, help="finished stream range end; requires --start")
     _add_follow_options(streamer, "watch the job until it finishes")
+    _add_publish_options(streamer)
     commands.add_parser("list", help="list jobs")
     status = commands.add_parser("status", help="show job progress")
     status.add_argument("job_id")
@@ -324,6 +341,9 @@ def build_parser():
     export.add_argument("job_id")
     export.add_argument("candidate_id")
     _add_follow_options(export, "watch the export until it finishes")
+    from .publish.cli import add_parser as add_publish_parser
+
+    add_publish_parser(commands)
     return parser
 
 
@@ -369,6 +389,10 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "publish":
+            # Publishing is local-only and must never start the editing server.
+            from .publish.cli import run as run_publish
+            return run_publish(args)
         if args.command == "serve":
             if not 1 <= args.port <= 65535:
                 raise CLIError("Port must be between 1 and 65535")
@@ -399,7 +423,17 @@ def main(argv=None):
         if args.command == "list":
             result = _request(args.api_url, "GET", "/api/jobs")
         elif args.command in {"submit", "streamer"}:
-            result = _request(args.api_url, "POST", "/api/jobs", {"source": source})
+            payload = {"source": source}
+            if getattr(args, "auto_publish", None) is not None:
+                payload["auto_publish"] = args.auto_publish
+            if getattr(args, "publish_title", None):
+                payload["publish_title"] = args.publish_title
+            if getattr(args, "publish_platforms", None):
+                payload["publish_platforms"] = [p.strip() for p in args.publish_platforms.split(",")
+                                                if p.strip()]
+            if getattr(args, "publish_privacy", None):
+                payload["publish_privacy"] = args.publish_privacy
+            result = _request(args.api_url, "POST", "/api/jobs", payload)
             _print_result(result)
             if args.follow:
                 if not isinstance(result, dict) or result.get("id") is None:
