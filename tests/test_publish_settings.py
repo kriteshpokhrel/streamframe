@@ -71,6 +71,17 @@ def test_media_host_configuration_is_validated(tmp_path):
         Settings.load(data_dir=tmp_path, environ={"STREAMFRAME_MEDIA_HOST": "ftp"})
 
 
+def test_catbox_host_needs_no_public_base_url(tmp_path):
+    settings = Settings.load(data_dir=tmp_path, environ={"STREAMFRAME_MEDIA_HOST": "catbox"})
+    assert settings.media.configured
+
+    with pytest.raises(ConfigError):
+        Settings.load(data_dir=tmp_path, environ={
+            "STREAMFRAME_MEDIA_HOST": "catbox",
+            "STREAMFRAME_CATBOX_EXPIRY": "5h",
+        })
+
+
 def test_env_file_is_discovered_from_the_working_directory(tmp_path, monkeypatch):
     monkeypatch.delenv("STREAMFRAME_PUBLISH_ENV", raising=False)
     (tmp_path / ".env").write_text("STREAMFRAME_TIKTOK_CLIENT_KEY=abc\n", encoding="utf-8")

@@ -54,6 +54,47 @@ def test_no_host_explains_what_instagram_needs():
         NoMediaHost().put("clip.mp4", key="k")
 
 
+def test_catbox_host_uses_the_url_the_service_returns(tmp_path, monkeypatch):
+    from streamframe.publish import media as media_module
+    from streamframe.publish.settings import MediaSettings
+
+    class Response:
+        status_code = 200
+        text = "https://litter.catbox.moe/abc.mp4\n"
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(media_module.requests, "post", fake_post)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x" * 16)
+
+    published = media_module.CatboxHost(MediaSettings(host="catbox")).put(clip, key="abc")
+
+    assert published.url == "https://litter.catbox.moe/abc.mp4"
+    assert captured["data"] == {"reqtype": "fileupload", "time": "1h"}
+    assert "fileToUpload" in captured["files"]
+
+
+def test_catbox_host_rejects_an_error_response(tmp_path, monkeypatch):
+    from streamframe.publish import media as media_module
+    from streamframe.publish.settings import MediaSettings
+
+    class Response:
+        status_code = 200
+        text = "File too large"
+
+    monkeypatch.setattr(media_module.requests, "post", lambda *a, **k: Response())
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"x")
+    with pytest.raises(MediaError, match="rejected"):
+        media_module.CatboxHost(MediaSettings(host="catbox")).put(clip, key="abc")
+
+
 def test_sigv4_matches_the_aws_published_vector():
     """AWS4-HMAC-SHA256 example for IAM ListUsers, 2015-08-30."""
     url = "https://iam.amazonaws.com/?Action=ListUsers&Version=2010-05-08"
