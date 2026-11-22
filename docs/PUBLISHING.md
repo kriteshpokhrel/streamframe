@@ -75,6 +75,11 @@ per app or reuse a single page.
 You do **not** need App Review or Business Verification while the app only posts
 to accounts you own or manage. That changes the day you post for someone else.
 
+New Meta apps are no longer offered the standalone "Instagram login" product,
+so set `STREAMFRAME_INSTAGRAM_LOGIN=facebook` and link the Instagram account to
+a Facebook Page. That path uses `graph.facebook.com`; the standalone variant
+(`instagram`) remains for older apps.
+
 ### TikTok
 
 1. Create an app at `developers.tiktok.com`, add **Login Kit** and
