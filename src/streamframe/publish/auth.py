@@ -28,6 +28,9 @@ GOOGLE_AUTHORIZE = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 INSTAGRAM_AUTHORIZE = "https://www.instagram.com/oauth/authorize"
 INSTAGRAM_TOKEN = "https://api.instagram.com/oauth/access_token"
+# Short-lived -> long-lived uses /access_token; refreshing afterwards uses
+# /refresh_access_token. Using one for both breaks the 60-day token.
+INSTAGRAM_EXCHANGE = "https://graph.instagram.com/access_token"
 INSTAGRAM_SCOPES = "instagram_business_basic,instagram_business_content_publish"
 TIKTOK_AUTHORIZE = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_SCOPES = "video.upload,user.info.basic"
@@ -220,7 +223,7 @@ def _exchange(settings, platform, code, redirect_uri, verifier, session):
         user_id = payload.get("user_id")
         if not token:
             raise AuthError("Instagram returned no access token")
-        long_lived = session.get(INSTAGRAM_REFRESH, timeout=30, params={
+        long_lived = session.get(INSTAGRAM_EXCHANGE, timeout=30, params={
             "grant_type": "ig_exchange_token",
             "client_secret": settings.instagram.app_secret,
             "access_token": token,
