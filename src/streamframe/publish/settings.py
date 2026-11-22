@@ -22,7 +22,8 @@ from pathlib import Path
 import re
 
 PLATFORMS = ("youtube", "instagram", "tiktok")
-MEDIA_HOSTS = ("none", "local", "r2")
+MEDIA_HOSTS = ("none", "local", "r2", "catbox")
+CATBOX_EXPIRY = ("1h", "12h", "24h", "72h")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -160,9 +161,13 @@ class MediaSettings:
     r2_endpoint: str | None = None
     r2_access_key_id: str | None = None
     r2_secret_access_key: str | None = None
+    catbox_expiry: str = "1h"
 
     @property
     def configured(self):
+        # Litterbox returns the URL itself, so it needs no base URL.
+        if self.host == "catbox":
+            return True
         if not self.public_base_url:
             return False
         if self.host == "local":
@@ -214,9 +219,13 @@ class Settings:
             r2_endpoint=_text(environ.get("STREAMFRAME_R2_ENDPOINT")),
             r2_access_key_id=_text(environ.get("STREAMFRAME_R2_ACCESS_KEY_ID")),
             r2_secret_access_key=_text(environ.get("STREAMFRAME_R2_SECRET_ACCESS_KEY")),
+            catbox_expiry=(_text(environ.get("STREAMFRAME_CATBOX_EXPIRY")) or "1h"),
         )
         if media.host not in MEDIA_HOSTS:
             raise ConfigError(f"STREAMFRAME_MEDIA_HOST must be one of {', '.join(MEDIA_HOSTS)}")
+        if media.catbox_expiry not in CATBOX_EXPIRY:
+            raise ConfigError("STREAMFRAME_CATBOX_EXPIRY must be one of "
+                              + ", ".join(CATBOX_EXPIRY))
 
         privacy = (_text(environ.get("STREAMFRAME_YOUTUBE_PRIVACY")) or "public").lower()
         if privacy not in {"public", "unlisted", "private"}:

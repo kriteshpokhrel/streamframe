@@ -28,6 +28,7 @@ import requests
 from .settings import ConfigError, MediaSettings
 
 CHUNK = 1024 * 1024
+CATBOX_ENDPOINT = "https://litterbox.catbox.moe/resources/internals/api.php"
 
 
 class MediaError(RuntimeError):
@@ -142,7 +143,45 @@ class NoMediaHost:
         return None
 
 
+class CatboxHost:
+    """Transient public hosting with no account and no card.
+
+    Litterbox keeps the file for a fixed window and then removes it, which is
+    the lifetime Meta needs: it fetches the clip once, seconds after the media
+    container is created. The upload is public at an unguessable URL while it
+    lives.
+    """
+
+    def __init__(self, settings: MediaSettings, *, timeout=120):
+        self.expiry = settings.catbox_expiry
+        self.timeout = timeout
+
+    def put(self, path, key, *, content_type="video/mp4"):
+        path = Path(path)
+        name = f"{key}{path.suffix.lower() or '.mp4'}"
+        try:
+            with path.open("rb") as body:
+                response = requests.post(
+                    CATBOX_ENDPOINT,
+                    data={"reqtype": "fileupload", "time": self.expiry},
+                    files={"fileToUpload": (name, body, content_type)},
+                    timeout=self.timeout,
+                )
+        except requests.RequestException as exc:
+            raise MediaError(f"Temporary upload failed: {type(exc).__name__}") from exc
+        url = (response.text or "").strip()
+        if response.status_code != 200 or not url.startswith("https://"):
+            raise MediaError("Temporary upload was rejected")
+        return PublishedMedia(key=name, url=url)
+
+    def remove(self, key):
+        # Litterbox expires the upload itself; there is no delete without an account.
+        return None
+
+
 def build_host(settings: MediaSettings, *, timeout=120):
+    if settings.host == "catbox":
+        return CatboxHost(settings, timeout=timeout)
     if not settings.configured:
         return NoMediaHost()
     if settings.host == "local":
@@ -218,7 +257,7 @@ def sign_headers(*, method, url, headers, payload_hash, access_key, secret_key,
 
 
 __all__ = [
-    "LocalDirHost", "MediaError", "NoMediaHost", "PublishedMedia", "R2Host",
+    "CatboxHost", "LocalDirHost", "MediaError", "NoMediaHost", "PublishedMedia", "R2Host",
     "build_host", "canonical_request", "file_digest", "sign_headers",
     "ConfigError",
 ]
