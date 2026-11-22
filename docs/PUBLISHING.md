@@ -1,330 +1,305 @@
 # Publishing clips
 
-StreamFrame renders clips. This component posts them. It is deliberately
-separate from capture and rendering: nothing here can start a job, edit a
-candidate, or delete footage.
+StreamFrame renders clips. The `streamframe.publish` package posts them. It is a
+separate component with no write access to jobs, candidates, or footage: it reads
+a finished export and sends it to a platform.
 
-| Platform | What happens | Human step |
+| Platform | Delivery | Human step |
 | --- | --- | --- |
-| YouTube | Uploaded as a Short, public or unlisted | none |
-| Instagram | Published as a Reel | none |
-| TikTok | Delivered as a draft to the account inbox | finish it in the app |
+| YouTube | Short upload; public, unlisted or private | none |
+| Instagram | Reel published through the Meta API | none |
+| TikTok | Draft delivered to the account inbox | publish it in the app |
 
-TikTok is a draft because public API posting needs an audited app, and TikTok's
-audit rejects tools that upload to accounts you manage. The draft route
-(`video.upload`) needs no audit and no payment. TikTok discards an unfinished
-draft after 24 hours, and only five drafts may be pending at once.
+TikTok is the odd one because public API posting needs an audited app, and the
+audit rejects tools that upload to accounts the operator manages. The draft route
+(`video.upload`) needs no audit. TikTok discards an unfinished draft after 24
+hours and allows roughly five pending drafts. See
+[decisions](PUBLISHING-DECISIONS.md) for why this shape was chosen.
 
-This repository still ships no scheduler. Run `streamframe publish run` from
-cron, a CI job, or by hand.
+Nothing here schedules itself. Either a person runs `publish run`, the editor's
+**Upload to** button calls the API, or `publish_auto` lets the server publish
+each export as it lands.
 
-## Cost
-
-Zero. YouTube's default quota is 100 uploads per day. Instagram's is 50 per day.
-TikTok allows about 15 posts per day per account, of which roughly five can be
-pending drafts. The only optional cost is media hosting for Instagram, and
-Cloudflare R2's free tier covers it.
-
-## 1. Configure `.env`
+## Quick start
 
 ```sh
-./streamframe publish setup --write-env
+./streamframe publish setup --write-env   # create .env, print the next step
+./streamframe publish doctor              # exit 0 when nothing is missing
+./streamframe publish auth youtube        # once per platform, per machine
+./streamframe publish run --file clip.mp4 --title "The hook" --yes
 ```
 
-That creates `.env` with mode 0600 and prints the next console step for each
-platform, with links. Re-run `./streamframe publish setup` after each step; it
-reports what is still missing and exits non-zero until everything is ready.
+## Configuration
 
-To do it by hand instead: `cp .env.example .env`.
+Everything lives in a git-ignored `.env` at the repository root.
+`./streamframe publish setup --write-env` creates it from `.env.example` with
+mode 0600; `./streamframe publish setup` re-checks it and names the next missing
+step. Real environment variables override the file.
 
-`.env` is git-ignored. It holds the client secrets that can post to your
-accounts, so share it through your password manager, never through the
-repository. OAuth tokens are **not** stored there; they are written to
-`~/.streamframe/publish/credentials.json` with mode 0600.
+### Core
 
-Keep `STREAMFRAME_PUBLISH_PLATFORMS` set to the platforms you have actually
-configured. Anything listed but unconfigured shows up in `doctor` as a problem.
-
-## 2. Register three developer apps
-
-All three apps need a Terms and Privacy page on a public URL. Create one page
-per app or reuse a single page.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STREAMFRAME_PUBLISH_PLATFORMS` | all three | Comma-separated subset that may post. Anything listed but unconfigured shows as a problem. |
+| `STREAMFRAME_PUBLISH_AUTO` | `0` | App-level default for `auto_publish` on new jobs. |
+| `STREAMFRAME_PUBLISH_STATE_DIR` | `<data dir>/publish` | Where tokens and the ledger live. Pin it if the server and CLI use different data directories. |
+| `STREAMFRAME_PUBLISH_HTTP_TIMEOUT` | `120` | Per-request timeout, seconds. |
+| `STREAMFRAME_PUBLISH_POLL_TIMEOUT` | `300` | How long to wait for Instagram to finish processing a container. |
 
 ### YouTube
 
-1. In Google Cloud Console, create a project and enable **YouTube Data API v3**.
-2. Configure the OAuth consent screen as **External**, then add your own Google
-   account as a **test user**. You do not need to publish the app for personal
-   use; an unverified app is limited to 100 test users and shows a warning
-   screen, which is fine here.
-3. Create an OAuth client of type **Desktop app** and copy the client ID and
-   secret into `.env`.
-4. Redirect URI: `http://127.0.0.1:8766/callback` (the default; Google allows
-   loopback).
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STREAMFRAME_YOUTUBE_CLIENT_ID` | — | OAuth client ID. |
+| `STREAMFRAME_YOUTUBE_CLIENT_SECRET` | — | OAuth client secret. |
+| `STREAMFRAME_YOUTUBE_PRIVACY` | `public` | `public`, `unlisted`, `private`. |
+| `STREAMFRAME_YOUTUBE_CATEGORY_ID` | `24` | YouTube category (24 = Entertainment). |
+| `STREAMFRAME_YOUTUBE_MADE_FOR_KIDS` | `false` | Sets `selfDeclaredMadeForKids`. |
 
 ### Instagram
 
-1. The account must be a **Business or Creator** account.
-2. In the Meta app dashboard create an app and add
-   **Instagram → API setup with Instagram login**.
-3. Copy the **Instagram app ID** and **Instagram app secret** into `.env`.
-4. Add your HTTPS callback as a redirect URI and pass it with
-   `--redirect-uri`. Meta does not reliably accept loopback redirects, so this
-   flow uses a paste-the-code step.
-
-You do **not** need App Review or Business Verification while the app only posts
-to accounts you own or manage. That changes the day you post for someone else.
-
-New Meta apps are no longer offered the standalone "Instagram login" product,
-so set `STREAMFRAME_INSTAGRAM_LOGIN=facebook` and link the Instagram account to
-a Facebook Page. That path uses `graph.facebook.com`; the standalone variant
-(`instagram`) remains for older apps.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STREAMFRAME_INSTAGRAM_APP_ID` | — | Meta app ID. |
+| `STREAMFRAME_INSTAGRAM_APP_SECRET` | — | Meta app secret. |
+| `STREAMFRAME_INSTAGRAM_API_VERSION` | `v23.0` | Graph API version. Match the app dashboard. |
+| `STREAMFRAME_INSTAGRAM_LOGIN` | `instagram` | `facebook` for Page-linked accounts, `instagram` for older standalone apps. |
+| `STREAMFRAME_INSTAGRAM_PAGE_ID` | — | Optional. Skips `me/accounts` discovery and reads this Page directly. |
+| `STREAMFRAME_INSTAGRAM_SHARE_TO_FEED` | `true` | Also show the Reel in the feed. |
 
 ### TikTok
 
-1. Create an app at `developers.tiktok.com`, add **Login Kit** and
-   **Content Posting API**, and enable the **Upload** configuration only.
-2. Request the `video.upload` scope. Do not request `video.publish`; it requires
-   the audit this design avoids.
-3. Put the client key and secret in `.env` and register an HTTPS redirect URI.
-
-### Which secrets go where
-
-| Value | Where | Why |
+| Variable | Default | Meaning |
 | --- | --- | --- |
-| Client IDs and secrets | `.env` | shared by the team, rotates rarely |
-| Access and refresh tokens | `~/.streamframe/publish/credentials.json` | per machine, rotates constantly |
-| Publication history | `~/.streamframe/publish/publications.sqlite3` | the idempotency ledger |
+| `STREAMFRAME_TIKTOK_CLIENT_KEY` | — | App client key. |
+| `STREAMFRAME_TIKTOK_CLIENT_SECRET` | — | App client secret. |
 
-## 3. Authorize this machine
+### Media host (Instagram only)
+
+Meta downloads a Reel from a URL, so Instagram needs the clip to be reachable.
+YouTube and TikTok accept the file bytes and never touch this.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `STREAMFRAME_MEDIA_HOST` | `none` | `none`, `catbox`, `local`, `r2`. |
+| `STREAMFRAME_CATBOX_EXPIRY` | `1h` | `1h`, `12h`, `24h`, `72h`. |
+| `STREAMFRAME_MEDIA_PUBLIC_BASE_URL` | — | Required for `local` and `r2`. |
+| `STREAMFRAME_MEDIA_LOCAL_DIR` | — | Required for `local`. |
+| `STREAMFRAME_R2_BUCKET` / `_ENDPOINT` / `_ACCESS_KEY_ID` / `_SECRET_ACCESS_KEY` | — | Required for `r2`. R2 asks for billing details even on the free tier. |
+
+### Where secrets live
+
+| Value | Location | Reason |
+| --- | --- | --- |
+| Client IDs and secrets | `.env` (0600, git-ignored) | shared by a team, rotates rarely |
+| Access and refresh tokens | `<state dir>/credentials.json` (0600) | per machine, rotates constantly |
+| Publication history | `<state dir>/publications.sqlite3` | idempotency ledger |
+
+## Platform setup
+
+Each platform needs a developer app. All of them want a privacy policy URL; a
+static page on any domain you control is enough.
+
+### YouTube
+
+1. Create a Google Cloud project and enable **YouTube Data API v3**.
+2. OAuth consent screen: **External**, then add your own account as a test user.
+3. Create an OAuth client of type **Desktop app**.
+4. Put the ID and secret in `.env`.
+5. Redirect URI: `http://127.0.0.1:8766/callback` (Google allows loopback for
+   desktop clients; no registration needed).
+
+> **Publish the consent screen to production.** While it stays in *Testing*,
+> Google issues refresh tokens that expire after **7 days**, so unattended
+> publishing dies weekly. An unverified app in production still works for your
+> own account; users just see a warning.
+
+An upload costs 1 unit from a dedicated bucket of 100 per day, so ten clips a day
+is comfortable.
+
+### Instagram
+
+Since 2026 Meta offers new apps two variants, and neither is the old standalone
+"Instagram login":
+
+- **Unified login** — needs a business portfolio and an integration system user
+- **Facebook login** — needs the Instagram professional account linked to a
+  Facebook Page
+
+`STREAMFRAME_INSTAGRAM_LOGIN=facebook` implements the second, which needs the
+least setup:
+
+1. The Instagram account must be **Business or Creator**.
+2. Link it to a Facebook Page, inside the Instagram app (Business tools and
+   controls → connect a Page). A Page alone is not enough; the link is what the
+   API reads.
+3. Create a Meta app, then add **Instagram → API setup with Facebook login** and
+   **Facebook Login for Business**.
+4. **App settings → Basic**: copy the App ID and secret, set the privacy policy
+   URL, and set **App domains** to the bare host of your callback (for example
+   `example.com`).
+5. **Facebook Login for Business → Settings**: add the exact HTTPS redirect URI
+   under *Valid OAuth Redirect URIs*. Any page you control works, because the
+   authorization code appears in the address bar; no server code is required.
+6. Put the App ID and secret in `.env`, then authorize:
+
+   ```sh
+   ./streamframe publish auth instagram \
+     --redirect-uri https://example.com/callback
+   ```
+
+   Approve in the browser, select the **Page** when Facebook asks, then paste the
+   full callback URL back into the terminal.
+
+App Review is not needed while the app only posts to accounts you own. Keep the
+app in Development mode if you prefer.
+
+If `me/accounts` returns no Pages even though the account can see the Page (a
+Page owned by a business portfolio can behave this way), set the Page ID
+explicitly:
 
 ```sh
-./streamframe publish auth youtube
-./streamframe publish auth instagram --redirect-uri https://example.com/callback
-./streamframe publish auth tiktok    --redirect-uri https://example.com/callback
+STREAMFRAME_INSTAGRAM_PAGE_ID=1234567890
 ```
 
-YouTube opens a browser and listens on loopback. Instagram and TikTok print a
-URL; approve it, then paste the callback URL (or just the code) back into the
-terminal. Nothing publishes during authorization.
+## TikTok
 
-## 4. Give Instagram a public URL
+1. Create an app at `developers.tiktok.com`.
+2. Add **Login Kit** and **Content Posting API**, and enable the **Upload**
+   configuration only.
+3. Request `video.upload`. Do **not** request `video.publish`; that is the audited
+   path this design avoids.
+4. Put the client key and secret in `.env`, register an HTTPS redirect URI, and
+   authorize:
 
-Meta downloads a Reel from a URL, so pick one free host in `.env`:
+   ```sh
+   ./streamframe publish auth tiktok --redirect-uri https://example.com/callback
+   ```
+
+Drafts arrive in the account inbox. Five pending drafts per 24 hours is the
+ceiling, so publish or discard them in the app.
+
+## Using it
+
+### From the editor
+
+Each finished clip under **Exports** has an **Upload to** block:
+
+- platform pills, pre-selected for every configured platform;
+- a **Title** field, required — pre-filled from the clip's opening title or the
+  source title, and left empty (button disabled) when neither exists, so a clip
+  is never published under an auto-generated filename;
+- a **YouTube privacy** choice, defaulting to public;
+- one result row per platform: published (with a link), in the TikTok inbox, or
+  failed with the platform's reason.
+
+### While adding a source
+
+**Add source** has *Upload finished clips to social platforms*: platforms, title
+and privacy for the whole job. It is available for every source type, including
+rolling live sessions, where each window that auto-exports is published as it
+lands.
+
+### From the CLI
 
 ```sh
-# a directory you already serve over HTTPS
-STREAMFRAME_MEDIA_HOST=local
-STREAMFRAME_MEDIA_LOCAL_DIR=/srv/clips/public
-STREAMFRAME_MEDIA_PUBLIC_BASE_URL=https://clips.example.com
-
-# or Cloudflare R2 / any S3-compatible bucket
-STREAMFRAME_MEDIA_HOST=r2
-STREAMFRAME_R2_BUCKET=streamframe-clips
-STREAMFRAME_R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
-STREAMFRAME_R2_ACCESS_KEY_ID=...
-STREAMFRAME_R2_SECRET_ACCESS_KEY=...
-STREAMFRAME_MEDIA_PUBLIC_BASE_URL=https://clips.example.com
-```
-
-Clips are uploaded just before publishing and removed afterwards. YouTube and
-TikTok need no hosting because they accept the file bytes.
-
-## 5. Check, then publish
-
-```sh
-./streamframe publish doctor          # config + credentials, exit 1 if incomplete
-./streamframe publish run --file out/clip.mp4 --caption "..."      # dry run
-./streamframe publish run --file out/clip.mp4 --caption "..." --yes  # real
+./streamframe publish run --file clip.mp4 --title "The hook"            # dry run
+./streamframe publish run --file clip.mp4 --title "The hook" --yes      # publish
 ./streamframe publish status
+./streamframe publish refresh
 ```
 
-`run` without `--yes` is a dry run and publishes nothing. This is intentional:
-the command is easy to put in cron by mistake.
+`run` without `--yes` prints the plan and posts nothing.
 
-## Upload from the editor
-
-Every finished clip under **Exports** has an **Upload to** block:
-
-- Checkboxes for YouTube, Instagram and TikTok, **pre-selected for every
-  configured platform**, so the default is one click.
-- A **Title** field, required. It is pre-filled from the clip's opening title or
-  the source title; if neither exists it is left **empty** rather than falling
-  back to the filename, and the upload button stays disabled until you type one.
-- A **YouTube privacy** choice, defaulting to *public*.
-- Platforms that are not enabled or not configured appear as *unavailable*,
-  with the missing setting in the tooltip, and cannot be selected.
-- Results appear one row per platform: `published`, `in the TikTok inbox`, or
-  `failed` with the platform's reason.
-
-Each platform is attempted independently. An Instagram rejection never stops
-the YouTube upload, and a failed platform does not stop the button from being
-used again. Clicking twice is harmless: the publish ledger sees the same clip
-and reports `already published` instead of posting again.
-
-The API behind it, if you are scripting:
+### From the API
 
 ```sh
+# publish one export
 curl -X POST localhost:8765/api/jobs/JOB_ID/exports/FILE.mp4/publish \
   -H 'Content-Type: application/json' \
-  -d '{"platforms":["youtube","instagram"]}'      # omit platforms for all
+  -d '{"platforms":["youtube"],"title":"The hook","privacy":"public"}'
+
+# what the editor's picker is allowed to offer
+curl -s localhost:8765/api/publish
 ```
 
-It returns `202` at once; outcomes land in the job's `publish_results`.
+The request returns `202` immediately; outcomes accumulate in the job's
+`publish_results`.
 
-## End-to-end automation
+## Behaviour
 
-Once the setup is done, you do not run `publish run` at all. Turn publishing on
-and every finished export posts itself.
+- **Isolation.** Each platform is attempted independently. One failure is
+  recorded on the job and never stops the others or the render.
+- **Idempotency.** A clip is keyed by the SHA-256 of its bytes. One row per
+  (clip, platform) is claimed before any network call, so retries, crashes and
+  double clicks cannot post twice. A crashed claim is recovered after 15 minutes.
+- **Ordering.** One background worker publishes sequentially, which keeps the
+  process inside TikTok's per-minute limit and the per-account daily caps.
+- **Terminal states.** `published` and `needs_manual` are never retried.
+  `needs_manual` is TikTok's inbox draft.
+- **Titles.** Manual publishing requires a title of 1–100 characters. Automatic
+  publishing requires one too, either supplied per job or inherited from an
+  explicit auto-export title.
 
-**App level** — every new job:
+## Operations
 
-```sh
-STREAMFRAME_PUBLISH_AUTO=1
-```
+- `.env` is read at first use; **restart the server** after changing it.
+- YouTube tokens do not expire while used. Instagram Page tokens from a
+  long-lived user token have no scheduled expiry; re-run `publish auth instagram`
+  if Meta invalidates one. Standalone Instagram login tokens last 60 days and are
+  refreshed by `publish refresh`.
+- Cron example, if clips arrive from outside the server:
 
-**Per source** — override it for one job only:
+  ```cron
+  0 */2 * * * cd /srv/streamframe && ./streamframe publish run \
+    --file "$(ls -t exports/*.mp4 | head -1)" --title "..." --yes >> publish.log 2>&1
+  ```
 
-```sh
-./streamframe submit clip.mp4 --auto-publish --publish-title "The hook" \
-  --publish-platforms youtube,instagram --publish-privacy public
-./streamframe streamer name --mode live --rolling --auto-publish \
-  --publish-title "Live clips"
-./streamframe submit clip.mp4 --no-auto-publish   # opt one source out
-
-# or through the API
-curl -X POST localhost:8765/api/jobs \
-  -d '{"source":{...},"auto_export":{"title":null},"auto_publish":true,
-       "publish_platforms":["youtube"],"publish_privacy":"public",
-       "publish_title":"The hook"}'
-```
-
-The **Add source** screen exposes the same settings: *Upload finished clips to
-social platforms*, with platform pills, a title and a privacy choice. It is
-visible for every source type, because rolling sessions publish each window as
-it is exported.
-
-A title is required for automatic upload. A clip is never published under an
-auto-generated filename, so the form refuses to submit without one.
-
-The per-source flag wins, and the resolved value is stored on the job as
-`auto_publish`, so a job is self-describing after the fact.
-
-Once a job has `auto_publish`, **every** export it produces is published —
-manual exports, automatic exports, and each rolling live window as it is
-rendered. That is what makes a live session end to end: capture → clip →
-export → publish, unattended.
-
-How it behaves:
-
-- **Separate worker.** One background thread with its own queue. It never takes
-  a render slot, and a publish failure is recorded on the job, never returned to
-  the capture pipeline. A dead platform cannot fail a render.
-- **Sequential on purpose.** One publish at a time per process, which keeps you
-  inside TikTok's 6-requests-per-minute and the per-account daily caps.
-- **Idempotent.** The content hash ledger means a re-queued or restarted clip
-  publishes once.
-- **Visible.** Each outcome lands in `job["publish_results"]`:
-  `{platform, action, url, detail, filename, at}`.
-
-```sh
-./streamframe status JOB_ID | grep publish_results
-```
-
-The caption and title come from the clip's opening title, falling back to the
-imported source title, then the filename. Set an opening title per source when
-you submit, or use `publish run --caption` when publishing by hand.
-
-TikTok still lands as an inbox draft. That is the one remaining hand-off, and
-it is where you choose the cover frame.
-
-### Captions
-
-The first line is what survives truncation, and it is rarely the same sentence
-everywhere. Pass per-platform text when you need it:
-
-```sh
-./streamframe publish run --file clip.mp4 \
-  --title "The four-second rule" \
-  --caption "default caption" \
-  --platforms youtube,instagram \
-  --yes
-```
-
-Instagram and TikTok read `--caption`. YouTube reads `--title` and
-`--description`, and `#Shorts` is added automatically.
-
-## Idempotency
-
-Each clip is keyed by the SHA-256 of its bytes. One row per (clip, platform) is
-claimed **before** any network call, so:
-
-- re-running the same command publishes nothing the second time;
-- two processes racing publish once;
-- a crashed run is recovered after 15 minutes, not left stuck forever;
-- a failed publish is retried up to three times, then needs `publish retry`.
-
-Re-rendering the same moment produces different bytes, so it is a new clip.
-Override with `--clip-key` when you want to treat several renders as one.
-
-`needs_manual` is a terminal state for TikTok. A second run will not upload a
-second draft.
-
-## Running unattended
-
-With `STREAMFRAME_PUBLISH_AUTO=1`, there is nothing to schedule for publishing:
-the server publishes each finished export as it lands. That covers the whole
-live loop, where a rolling session exports a window every minute or so.
-
-```cron
-# refresh tokens monthly; Instagram expires after 60 days
-0 3 1 * * cd /srv/streamframe && ./streamframe publish refresh >> publish.log 2>&1
-```
-
-If clips arrive from somewhere else — a different machine, a manual folder —
-publish the newest one on a schedule instead:
-
-```cron
-0 */2 * * * cd /srv/streamframe && ./streamframe publish run \
-  --file "$(ls -t exports/*.mp4 | head -1)" --yes >> publish.log 2>&1
-```
-
-Alerting matters more than retries: a stale token costs a day of posts silently.
-Have cron mail any non-zero exit. Publishing failures are also recorded on each
-job, so `publish status` shows what did not go out.
-
-## Viewer impact
-
-Automation does not change the clip, but it does change two things a viewer
-feels, so decide them rather than defaulting:
-
-- **The cover frame.** TikTok uses the first frame unless
-  `video_cover_timestamp_ms` is set, and that is the frame a person sees while
-  scrolling. Finish TikTok drafts in the app with the cover on the hook.
-- **The first line.** Only the opening characters survive truncation in the
-  feed. Write per-platform captions at export time, not at publish time.
-
-No retention claim is made here. Volume does not create reach, and since
-September 2026 TikTok keeps unoriginal clips out of the For You feed and YouTube
-reduces impressions for channels that mostly repost. Publish clips you have the
-right to share and add something of your own.
+Alert on non-zero exits. A revoked token otherwise costs a day of posts silently.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `401` / `session expired` | token expired or revoked | `publish auth <platform>` |
-| Instagram `HTTP 400` on media | URL not publicly reachable | check `STREAMFRAME_MEDIA_PUBLIC_BASE_URL` from another machine |
-| Instagram container `ERROR` | bad codec or aspect ratio | export 9:16 H.264/AAC MP4 |
-| TikTok `spam_risk_too_many_pending_share` | five drafts already waiting | publish or discard drafts in the app |
-| TikTok `unaudited_client_can_only_post_to_private_accounts` | `video.publish` was requested instead of `video.upload` | fix the app scopes |
+| `publish doctor` exits 1 | a listed platform is incomplete | it names the missing variable |
+| `401` / session expired | token revoked or expired | `publish auth <platform>` |
+| `Facebook returned no Pages` | authorized profile has no Page role | switch profile or grant Page access |
+| `No Instagram professional account is linked to` | Page has no linked IG account | link it in the Instagram app |
+| `Could not read Page <id>` | the ID is a profile, not a Page | use the Page ID from Business Settings |
+| Instagram `HTTP 400` on media | URL not reachable by Meta | verify the public URL from another machine |
+| Instagram container `ERROR` | codec or aspect rejected | export 9:16 H.264/AAC under 300 MB |
+| TikTok `spam_risk_too_many_pending_share` | five drafts already waiting | publish or discard drafts |
 | `retry limit reached` | three failed attempts | fix the cause, then `publish retry --clip-key ...` |
-| `No such filter: 'ass'` in render tests | FFmpeg built without libass | see `START.md` prerequisites |
 
-## What this component never does
+## Where the code lives
 
-- It does not upload to a platform that is not listed in
-  `STREAMFRAME_PUBLISH_PLATFORMS`.
-- It does not store credentials in the repository.
-- It does not delete or edit clips; it reads an exported file and copies it out.
-- It does not run inside the API server. `publish` never starts the server.
+| File | Responsibility |
+| --- | --- |
+| `publish/settings.py` | `.env` parsing, typed config, per-platform problems |
+| `publish/ledger.py` | SQLite idempotency ledger and stale-claim recovery |
+| `publish/media.py` | public hosting for Instagram (`catbox`, `local`, `r2`) |
+| `publish/tokens.py` | credential store and refresh |
+| `publish/auth.py` | OAuth flows, one per platform |
+| `publish/youtube.py`, `instagram.py`, `tiktok.py` | one client per platform |
+| `publish/runner.py` | orchestration, dry run, error sanitising |
+| `publish/cli.py` | `streamframe publish …` |
+| `jobs.py` | queue, worker, `publish_export`, per-job settings |
+| `server.py` | `/api/publish` and the export publish route |
+
+See [decisions](PUBLISHING-DECISIONS.md) for why it is shaped this way and how to
+extend it.
+
+## Viewer impact
+
+Automation does not change the clip, but two things a viewer feels are set here
+rather than at export time:
+
+- **The first line.** Only the opening characters survive truncation in a feed,
+  which is why a title is required and why per-platform captions exist.
+- **The cover frame.** TikTok uses the first frame unless the draft is finished
+  with a different one, so the inbox step is where the hook is chosen.
+
+No retention claim is made. Volume does not create reach: since September 2026
+TikTok keeps unoriginal clips out of the For You feed and YouTube reduces
+impressions for channels that mostly repost. Publish what you have the right to
+share.
