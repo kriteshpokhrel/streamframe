@@ -11,4 +11,6 @@ frontend/.browser-test-*/
 frontend/*.tsbuildinfo
 data/
 .streamframe/
+.env
+.env.local
 .DS_Store

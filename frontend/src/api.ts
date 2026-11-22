@@ -1,4 +1,4 @@
-import type { CandidateChanges, ExportedVideo, ExportFile, Job, JobExport } from './types';
+import type { CandidateChanges, ExportedVideo, ExportFile, Job, JobExport, PublishOptions, PublishResult } from './types';
 
 export const jobPath = (id: string) => `/api/jobs/${encodeURIComponent(id)}`;
 
@@ -195,4 +195,39 @@ export async function startExport(job: string, candidate: string): Promise<{ fil
   if (!text) return { files: [], pending };
   try { return { files: exportResponseFiles(JSON.parse(text), job, candidate), pending }; }
   catch { throw new Error('Export completed but returned an unsupported response. Expected JSON export filenames or video bytes.'); }
+}
+
+export async function getPublishConfig(signal?: AbortSignal): Promise<PublishOptions> {
+  const data = await request<PublishOptions>('/api/publish', { signal });
+  if (!Array.isArray(data?.platforms)) throw new Error('Invalid publish configuration response.');
+  return {
+    platforms: data.platforms,
+    default_privacy: typeof data.default_privacy === 'string' ? data.default_privacy : 'public',
+  };
+}
+
+// Publishing is asynchronous: this only queues the clip and returns the job.
+// The title is required so a clip never publishes under an auto-generated name.
+export const publishExport = (job: string, filename: string,
+  body: { platforms: string[]; title: string; caption?: string; privacy?: string }) =>
+  request<unknown>(`${jobPath(job)}/exports/${encodeURIComponent(filename)}/publish`, {
+    method: 'POST', body: JSON.stringify(body),
+  });
+
+// Outcomes accumulate per file, so one export's history never leaks into another's.
+export function publishResultsFor(job: Job | undefined, filename: string): PublishResult[] {
+  const results = job?.publish_results;
+  return Array.isArray(results) ? results.filter((entry) => entry.filename === filename) : [];
+}
+
+export function publishLabel(result: PublishResult): string {
+  if (result.action === 'published') return 'published';
+  if (result.action === 'needs_manual') return 'in the TikTok inbox — finish it in the app';
+  if (result.action === 'failed') return 'failed';
+  if (result.action === 'skipped') {
+    if (result.detail === 'needs_manual') return 'already in the inbox';
+    if (result.detail === 'published') return 'already published';
+    return result.detail ? `skipped: ${result.detail}` : 'skipped';
+  }
+  return result.action;
 }

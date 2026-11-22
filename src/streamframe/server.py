@@ -52,10 +52,24 @@ GET /api/jobs/{id}/media -> imported video bytes, including HTTP Range support
 GET /api/jobs/{id}/exports/{filename} -> MP4 attachment
 DELETE /api/jobs/{id}/exports/{filename} -> 204; removes only that published export
 DELETE /api/jobs/{id}/exports -> 204; removes published exports for that source only
+GET /api/publish -> {"platforms":[{name,enabled,configured,detail}]} for the "Upload to" picker
+POST /api/jobs/{id}/exports/{filename}/publish {"platforms"?:[name]} -> 202 Job
+  Queues one finished export for publishing. Omitted platforms uses the
+  configured set. Publishing is asynchronous: outcomes appear in the job's
+  publish_results, one entry per platform. Each platform is attempted
+  independently, so a failure on one never blocks the others, and the publish
+  ledger makes a repeat request a no-op rather than a second post.
 POST /api/jobs optionally accepts auto_export: {title?: string | null} alongside source.
-  Exports the two highest-scored moments with usable framing in that selection.
   An omitted or blank title uses the imported video title or local filename.
   An explicit null exports without an opening title.
+POST /api/jobs optionally accepts auto_publish: true|false alongside source.
+  Finished exports are then posted to the configured platforms by a separate
+  background worker. The job's publish_results records each outcome. Omitted
+  uses STREAMFRAME_PUBLISH_AUTO; publishing never blocks or fails the export.
+  Optional publish_platforms (subset of youtube/instagram/tiktok),
+  publish_privacy (public|unlisted|private) and publish_title (1-100 chars)
+  scope that upload. Automatic upload requires a title: an auto-generated
+  filename is never published on the user's behalf.
 Job: id, source, status, stage, progress, candidates, exports, media_url, error,
   operation ("analyze"|"export"), export_candidate_id, created_at, updated_at;
   timestamps are Unix seconds, error/media_url/export_candidate_id nullable.
@@ -69,7 +83,7 @@ Job: id, source, status, stage, progress, candidates, exports, media_url, error,
 Candidate: id (immutable string), start, end, score (finite number), evidence
   (list of strings), words (list of {start,end,text,correction?:string}),
   face_crop, content_crop (null or normalized {x,y,width,height}), optional
-  opening_title (up to 60 characters; empty disables it).
+  opening_title (up to 90 characters; empty disables it).
   For imported sources, face_crop applies to all candidates on the job.
 Export: {candidate_id,filename,url}. Edits and exports return the whole Job.
 Missing resources: 404; invalid JSON/schema/source: 422; busy/state conflict:
@@ -194,9 +208,9 @@ def create_app(data_dir=None, import_roots=None, analyzer=None, renderer=None):
         except (ValueError, UnicodeError):
             raise HTTPException(422, "Body must be a JSON object")
 
-    async def invoke(request, method, *args):
+    async def invoke(request, method, *args, **kwargs):
         try:
-            return await run_in_threadpool(getattr(request.app.state.jobs, method), *args)
+            return await run_in_threadpool(getattr(request.app.state.jobs, method), *args, **kwargs)
         except KeyError:
             raise HTTPException(404, "Job, candidate, or media not found")
         except Conflict as exc:
@@ -218,11 +232,19 @@ def create_app(data_dir=None, import_roots=None, analyzer=None, renderer=None):
     @app.post("/api/jobs", status_code=202)
     async def create_job(request: Request):
         payload = await body(request)
-        if "source" not in payload or set(payload) - {"source", "auto_export"}:
-            raise HTTPException(422, "Expected source and optional auto_export")
-        if "auto_export" in payload:
-            return await invoke(request, "create", payload["source"], payload["auto_export"])
-        return await invoke(request, "create", payload["source"])
+        allowed = {"source", "auto_export", "auto_publish",
+                   "publish_platforms", "publish_privacy", "publish_title"}
+        if "source" not in payload or set(payload) - allowed:
+            raise HTTPException(422, "Unexpected field in job request")
+        arguments = [payload["source"]]
+        if "auto_export" in payload or "auto_publish" in payload:
+            arguments.append(payload.get("auto_export"))
+        if "auto_publish" in payload:
+            arguments.append(payload["auto_publish"])
+        keywords = {name: payload[name]
+                    for name in ("publish_platforms", "publish_privacy", "publish_title")
+                    if name in payload}
+        return await invoke(request, "create", *arguments, **keywords)
 
     @app.get("/api/jobs/{job_id}")
     async def get_job(job_id: str, request: Request):
@@ -281,6 +303,19 @@ def create_app(data_dir=None, import_roots=None, analyzer=None, renderer=None):
     async def delete_exports(job_id: str, request: Request):
         await invoke(request, "delete_exports", job_id)
         return Response(status_code=204)
+
+    @app.get("/api/publish")
+    async def publish_config(request: Request):
+        return await invoke(request, "publish_config")
+
+    @app.post("/api/jobs/{job_id}/exports/{filename}/publish", status_code=202)
+    async def publish_export(job_id: str, filename: str, request: Request):
+        payload = await body(request)
+        if set(payload) - {"platforms", "title", "caption", "privacy"}:
+            raise HTTPException(422, "Expected platforms, title, caption or privacy")
+        return await invoke(request, "publish_export", job_id, filename,
+                            payload.get("platforms"), payload.get("title"),
+                            payload.get("caption"), payload.get("privacy"))
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     if frontend.is_dir():

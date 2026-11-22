@@ -17,9 +17,9 @@ from unittest.mock import patch
 import uuid
 
 from streamframe.jobs import (
-    Cancelled, Conflict, DownloadProxy, JobStore, analyze_media, hls_segments,
-    public_target, resolve_video, source_range, validate_remote_source,
-    validate_candidate,
+    BUNDLED_BRAND_DIR, Cancelled, Conflict, DownloadProxy, JobStore, analyze_media,
+    brand_preset, hls_segments, public_target, resolve_video, source_range,
+    validate_remote_source, validate_candidate,
 )
 
 try:
@@ -45,6 +45,14 @@ def render(path, item, output, progress, cancelled):
     progress(1, "Rendered")
 
 
+def png_size(path):
+    """Read width and height from a PNG IHDR chunk without an image library."""
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n" or data[12:16] != b"IHDR":
+        raise ValueError(f"{path} is not a PNG")
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
 class Workspace(unittest.TestCase):
     def setUp(self):
         # Deliberately keep every fixture inside the repository, not a temp dir.
@@ -55,6 +63,19 @@ class Workspace(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.workspace)
+
+
+class BrandPresetTests(Workspace):
+    def test_bundled_preset_keeps_exports_branded_on_a_fresh_clone(self):
+        preset = brand_preset(self.workspace / "data")
+        self.assertEqual(preset, BUNDLED_BRAND_DIR)
+        self.assertEqual(png_size(preset / "watermark.png"), (172, 115))
+        self.assertEqual(png_size(preset / "outro.png"), (1254, 1254))
+
+    def test_data_directory_preset_overrides_the_bundled_artwork(self):
+        root = self.workspace / "data"
+        (root / "lobby-crew").mkdir(parents=True)
+        self.assertEqual(brand_preset(root), root / "lobby-crew")
 
 
 class StoreTests(Workspace):
