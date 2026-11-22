@@ -1,6 +1,7 @@
 """Instagram authorization exchanges, without any network."""
 
 import time
+from dataclasses import replace
 
 from streamframe.publish import auth
 from streamframe.publish.settings import InstagramSettings, Settings
@@ -79,6 +80,25 @@ def test_facebook_login_finds_the_page_and_its_instagram_account(tmp_path):
     assert record["expires_at"] is None
 
 
+def test_a_configured_page_id_skips_discovery(tmp_path):
+    session = Session(get_responses=[
+        Response(payload={"access_token": "short"}),
+        Response(payload={"access_token": "long"}),
+        Response(payload={"id": "999", "name": "Lobby Crew", "access_token": "pagetoken",
+                          "instagram_business_account": {"id": "ig42"}}),
+    ])
+    settings = settings_for(tmp_path, login="facebook")
+    settings = replace(settings, instagram=replace(settings.instagram, page_id="999"))
+
+    record = auth._exchange(settings, "instagram", "code",
+                            "https://example.test/cb", None, session)
+
+    api = settings.instagram.api_version
+    assert session.calls[2][:2] == ("GET", f"https://graph.facebook.com/{api}/999")
+    assert record["user_id"] == "ig42"
+    assert record["access_token"] == "pagetoken"
+
+
 def test_facebook_login_explains_a_page_without_instagram(tmp_path):
     session = Session(get_responses=[
         Response(payload={"access_token": "short"}),
@@ -93,3 +113,22 @@ def test_facebook_login_explains_a_page_without_instagram(tmp_path):
     except auth.AuthError as exc:
         with_error = str(exc)
     assert with_error and "Link the Instagram account" in with_error
+    assert "No Instagram here" in with_error
+
+
+def test_facebook_login_explains_an_empty_page_list(tmp_path):
+    session = Session(get_responses=[
+        Response(payload={"access_token": "short"}),
+        Response(payload={"access_token": "long"}),
+        Response(payload={"data": []}),
+        Response(payload={"id": "1", "name": "Wrong Profile"}),
+    ])
+
+    with_error = None
+    try:
+        auth._exchange(settings_for(tmp_path, login="facebook"), "instagram", "code",
+                       "https://example.test/cb", None, session)
+    except auth.AuthError as exc:
+        with_error = str(exc)
+    assert with_error and "grant access to your Page" in with_error
+    assert "authorized as Wrong Profile" in with_error
