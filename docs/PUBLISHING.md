@@ -20,6 +20,33 @@ Nothing here schedules itself. Either a person runs `publish run`, the editor's
 **Upload to** button calls the API, or `publish_auto` lets the server publish
 each export as it lands.
 
+## Prerequisites
+
+Publishing runs inside StreamFrame, so it inherits the app's requirements. Each
+one is here with the reason it is needed, because a missing piece usually shows
+up as a confusing platform error rather than a clear one.
+
+| Requirement | Why |
+| --- | --- |
+| Python 3.10 | the pinned interpreter; `requirements.lock` targets it |
+| Node.js 22 | builds the editor the launcher serves |
+| FFmpeg with `libx264` | H.264 encoding; the publisher uploads the rendered file |
+| FFmpeg with AAC | the audio track in every export |
+| FFmpeg with `libass` | burned-in captions; rendering fails without it |
+| `ffprobe` beside `ffmpeg` | duration and dimension checks during import and export |
+| Whisper `small` (optional) | word-timed captions; without it clips analyze speech-free |
+| Writable data directory (`~/.streamframe` by default) | jobs, exports, tokens and the ledger |
+| A public HTTPS URL for the OAuth callback | Meta and TikTok reject loopback redirects |
+| No extra Python packages | publishing uses `requests`, already a dependency |
+
+The callback URL needs no server of its own: the authorization code appears in
+the address bar, so any page you control works. A static site is enough — the
+consent pages in this repository are one example.
+
+Each platform issues its own credentials through its own developer console;
+there is no shared registry, which is why setup is per platform rather than one
+sign-up.
+
 ## Quick start
 
 ```sh
