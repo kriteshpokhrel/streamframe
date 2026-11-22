@@ -118,8 +118,8 @@ def test_auto_export_ranks_two_and_applies_opening_title(library, settings, expe
     rendered = []
 
     def analyzer(*_):
-        return [{**CANDIDATE, "id": name, "score": score}
-                for name, score in (("low", .2), ("best", .9), ("next", .7))]
+        return [{**CANDIDATE, "id": name, "score": score, "start": start, "end": start + 0.7}
+                for name, score, start in (("low", .2, 9.0), ("best", .9, 0.1), ("next", .7, 5.0))]
 
     def renderer(path, candidate, output, progress, cancelled):
         rendered.append((candidate["id"], candidate["opening_title"]))
@@ -137,6 +137,33 @@ def test_auto_export_ranks_two_and_applies_opening_title(library, settings, expe
         assert [entry["candidate_id"] for entry in job["exports"]] == ["best", "next"]
         assert job["auto_export_pending"] == []
         assert "auto_export_notice" not in job
+
+
+def test_auto_export_exports_one_when_the_two_best_moments_overlap(library):
+    _, original, app = library
+    rendered = []
+
+    def analyzer(*_):
+        return [{**CANDIDATE, "id": name, "score": score, "start": start, "end": start + 30}
+                for name, score, start in (("best", .9, 100.0), ("duplicate", .8, 104.0),
+                                           ("distinct", .1, 400.0))]
+
+    def renderer(path, candidate, output, progress, cancelled):
+        rendered.append(candidate["id"])
+        render(path, candidate, output, progress, cancelled)
+
+    with TestClient(app(analyzer, renderer), base_url=LOCAL, client=("127.0.0.1", 30000)) as client:
+        store = client.app.state.jobs
+        with store.lock:
+            job_id = store.create({"type": "file", "path": str(original)}, {"title": "Hook"})["id"]
+            worker = store.active[job_id][1]
+        join(worker)
+        job = client.get(f"/api/jobs/{job_id}").json()
+        assert job["status"] == "succeeded", job["error"]
+        assert rendered == ["best"]
+        assert [entry["candidate_id"] for entry in job["exports"]] == ["best"]
+        assert job["auto_export_pending"] == []
+        assert "same footage" in job["auto_export_notice"]
 
 
 def test_unsafe_paths_never_follow_symlinks(library):

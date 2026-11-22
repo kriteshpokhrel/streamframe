@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { candidateJobExports, exportedVideos, exportFiles, failedSourceStatus, getDiagnostics, jobControls, startExport } from '../src/api.ts';
+import { candidateJobExports, exportedVideos, exportFiles, failedSourceStatus, getDiagnostics, jobControls, publishLabel, publishResultsFor, startExport } from '../src/api.ts';
 
 const outputs = [
   { candidate_id: 'first', filename: 'first.mp4' },
@@ -108,4 +108,28 @@ test('legacy unsupported bounded acquisition failures are not mislabeled as reso
     'Resolution failed — source not confirmed');
   assert.equal(failedSourceStatus({ error: 'FFmpeg export failed' }),
     'Source metadata unavailable — job failed (see error)');
+});
+
+test('publish results belong to the file that produced them', () => {
+  const job = { publish_results: [
+    { platform: 'youtube', action: 'published', filename: 'a.mp4' },
+    { platform: 'instagram', action: 'failed', detail: 'rejected', filename: 'a.mp4' },
+    { platform: 'youtube', action: 'published', filename: 'b.mp4' },
+  ] };
+  assert.deepEqual(publishResultsFor(job, 'a.mp4').map((entry) => entry.platform),
+    ['youtube', 'instagram']);
+  assert.deepEqual(publishResultsFor(job, 'b.mp4').map((entry) => entry.platform), ['youtube']);
+  assert.deepEqual(publishResultsFor(job, 'missing.mp4'), []);
+  assert.deepEqual(publishResultsFor(undefined, 'a.mp4'), []);
+  assert.deepEqual(publishResultsFor({ publish_results: 'nope' }, 'a.mp4'), []);
+});
+
+test('each publish outcome reads as its own status', () => {
+  assert.equal(publishLabel({ platform: 'youtube', action: 'published', filename: 'a.mp4' }), 'published');
+  assert.match(publishLabel({ platform: 'tiktok', action: 'needs_manual', filename: 'a.mp4' }),
+    /TikTok inbox/);
+  assert.equal(publishLabel({ platform: 'youtube', action: 'skipped', detail: 'published', filename: 'a.mp4' }),
+    'already published');
+  assert.equal(publishLabel({ platform: 'instagram', action: 'failed', detail: 'HTTP 500', filename: 'a.mp4' }),
+    'failed');
 });

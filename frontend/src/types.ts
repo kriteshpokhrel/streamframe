@@ -56,6 +56,27 @@ export interface JobExport {
   end?: number;
 }
 
+export interface PublishPlatform {
+  name: string;
+  enabled: boolean;
+  configured: boolean;
+  detail: string | null;
+}
+
+export interface PublishOptions {
+  platforms: PublishPlatform[];
+  default_privacy: string;
+}
+
+export interface PublishResult {
+  platform: string;
+  action: string;
+  url?: string | null;
+  detail?: string | null;
+  filename: string;
+  at?: string;
+}
+
 export interface Job {
   id: string;
   status: string;
@@ -70,6 +91,7 @@ export interface Job {
     ({ type: 'streamer'; platform: 'twitch' | 'youtube'; identifier: string;
       mode: 'auto' | 'live' | 'latest'; duration?: number; start?: number; end?: number } & RollingOptions);
   exports?: JobExport[];
+  publish_results?: PublishResult[];
   created_at?: number;
   live_session?: {
     phase: string;

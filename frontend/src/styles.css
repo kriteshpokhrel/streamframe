@@ -255,6 +255,34 @@ video { display: block; width: 100%; height: auto; }
 .pending-export-media progress { width: min(100%, 120px); }
 .export-card-body > * + *, .export-provenance > div + div { margin-top: 8px; }
 .export-card-body .actions { margin-top: 14px; }
+
+.upload-to { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.upload-to-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.upload-to h4 { margin: 0; font-size: .75rem; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); }
+.upload-to-picks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.upload-pick { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px;
+  font-size: .8125rem; text-transform: capitalize; border: 1px solid var(--line); border-radius: 999px; }
+.upload-pick.ready { cursor: pointer; }
+.upload-pick.ready:has(input:checked) { background: var(--selected); border-color: var(--accent); }
+.upload-pick.unavailable { opacity: .55; }
+.upload-pick.unavailable > span { text-transform: none; }
+.upload-to-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(9rem, auto);
+  gap: 10px; align-items: end; }
+.upload-to-fields input, .upload-to-fields select { width: 100%; }
+.upload-title input[aria-invalid] { border-color: var(--error-line); }
+.upload-hint { margin: 8px 0 0; font-size: .8125rem; color: var(--muted); }
+.upload-hint.error { color: var(--error); }
+.upload-results { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; font-size: .8125rem; }
+.upload-results li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.upload-results li strong { text-transform: capitalize; }
+.upload-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--control); }
+.upload-results li.published { color: var(--success); }
+.upload-results li.published .upload-dot { background: var(--success); }
+.upload-results li.needs_manual { color: var(--warning); }
+.upload-results li.needs_manual .upload-dot { background: var(--warning); }
+.upload-results li.failed { color: var(--error); }
+.upload-results li.failed .upload-dot { background: var(--error); }
 .export-card-footer { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 4px; margin-top: 14px; border-top: 1px solid var(--line); padding-top: 6px; }
 .export-details { flex: 1 1 105px; min-width: 0; color: var(--muted); font-size: .875rem; }
 .export-details[open] { flex-basis: 100%; }

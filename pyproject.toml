@@ -27,5 +27,8 @@ streamframe = "streamframe.cli:main"
 where = ["src"]
 include = ["streamframe*"]
 
+[tool.setuptools.package-data]
+streamframe = ["assets/lobby-crew/*", "assets/fonts/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

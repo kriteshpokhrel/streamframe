@@ -64,6 +64,25 @@ class CaptionTests(unittest.TestCase):
         self.assertNotIn(r"{\p1}", ass)
         self.assertIn("0:00:02.40,Opening", render._ass([], "A short hook", 30))
 
+    def test_branded_title_matches_the_approved_breaks_and_keeps_phrases_together(self):
+        self.assertEqual(
+            render._branded_title_layout("iShowSpeed Finds A HULK-LIKE MONSTER In GTA 6 ⚽"),
+            (["iShowSpeed", "Finds A HULK-LIKE", "MONSTER In GTA 6 ⚽"], 62),
+        )
+        lines, size = render._branded_title_layout(
+            "iShowSpeed BREAKS HIS SETUP While Playing GTA 6 💀 (CRASHES")
+        self.assertEqual(lines, ["iShowSpeed BREAKS", "HIS SETUP While Playing", "GTA 6 💀 (CRASHES"])
+        self.assertLessEqual(len(lines), render.TITLE_MAX_LINES)
+        self.assertLessEqual(max(render._title_width(line) for line in lines) * size,
+                             render.TITLE_WIDTH)
+        self.assertGreaterEqual(size, render.TITLE_MIN_SIZE)
+
+    def test_emoji_runs_use_the_bundled_font_and_restore_the_title_font(self):
+        text = render._title_text("GTA 6 💀 (CRASHES", "DejaVu Sans", 58)
+        self.assertIn(r"{\fnNoto Emoji\fs52}💀{\fnDejaVu Sans\fs58}", text)
+        self.assertTrue((render.FONT_DIR / "NotoEmoji.ttf").is_file())
+        self.assertIn(":fontsdir=", render._ass_filter("title.ass", "[finished]"))
+
     def test_captions_keep_fixed_phrases_and_do_not_reveal_phrases_across_a_pause(self):
         ass = render._ass([(0, 0.3, "First"), (0.32, 0.7, "phrase"), (2.8, 3.2, "Later")])
         first, second, later = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
@@ -90,7 +109,7 @@ class CaptionTests(unittest.TestCase):
             seen.append(args)
             if "-filter_complex" in args:
                 graph = args[args.index("-filter_complex") + 1]
-                ass_name = graph.split("ass=filename=")[1].split("[captioned]")[0].strip("'")
+                ass_name = graph.split("ass=filename=")[1].split("'")[1]
                 self.assertEqual(Path(ass_name).name, ass_name)
                 self.assertIn("corrected", (cwd / ass_name).read_text())
                 Path(args[-1]).write_bytes(b"fake")
