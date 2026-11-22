@@ -106,6 +106,7 @@ machine must still authorize itself:
 | Client IDs and secrets | OAuth tokens (`credentials.json`) |
 | Platform selection, privacy default | The publish ledger |
 | Media host and expiry | Anything already published |
+| `STREAMFRAME_PUBLISH_REDIRECT_URI` (the registered callback) | |
 | `STREAMFRAME_INSTAGRAM_PAGE_ID` (account-specific, not machine-specific) | |
 
 Practical steps for a collaborator:
@@ -115,10 +116,16 @@ Practical steps for a collaborator:
    `libass`). Publishing adds no dependency of its own.
 3. Run `./streamframe publish doctor` — it will list every platform as needing
    authorization, which is expected.
-4. Run `./streamframe publish auth <platform>` once per platform, using the
-   redirect URI already registered in the shared developer app.
+4. Run `./streamframe publish auth <platform>` once per platform. It uses
+   `STREAMFRAME_PUBLISH_REDIRECT_URI` unless `--redirect-uri` is passed.
 5. `STREAMFRAME_PUBLISH_STATE_DIR` uses `~`, so it resolves per machine; tokens
    and the ledger land in that machine's home directory.
+
+**Authorization needs a human.** `publish auth` prints a URL, waits for a
+browser approval, then asks for the callback URL on stdin. Everything before and
+after that can be automated; this one step cannot, because it exists to prove
+the operator's identity. An agent should run other commands freely, but print the
+URL and stop here rather than trying to script the consent.
 
 Two people publishing from two machines both authorize separately, and each keeps
 its own ledger. That means the same file could be posted once per machine. Share
