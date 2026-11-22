@@ -138,6 +138,9 @@ class InstagramSettings:
     # "facebook": graph.facebook.com, Instagram account linked to a Page.
     # New Meta apps are only offered the Facebook/Unified variants.
     login: str = "instagram"
+    # Optional: skip me/accounts discovery and read this Page directly. Useful
+    # when the Page is owned by a business portfolio and discovery returns none.
+    page_id: str | None = None
 
     @property
     def configured(self):
@@ -256,6 +259,7 @@ class Settings:
                 api_version=_text(environ.get("STREAMFRAME_INSTAGRAM_API_VERSION")) or "v23.0",
                 share_to_feed=_flag(environ.get("STREAMFRAME_INSTAGRAM_SHARE_TO_FEED"), True),
                 login=login,
+                page_id=_text(environ.get("STREAMFRAME_INSTAGRAM_PAGE_ID")),
             ),
             tiktok=TikTokSettings(
                 client_key=_text(environ.get("STREAMFRAME_TIKTOK_CLIENT_KEY")),

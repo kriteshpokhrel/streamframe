@@ -299,15 +299,46 @@ def _exchange_facebook(settings, code, redirect_uri, session):
     if long_lived.status_code == 200:
         token = long_lived.json().get("access_token", token)
 
+    if settings.instagram.page_id:
+        page = _page_by_id(graph, settings.instagram.page_id, token, session)
+        return {
+            "access_token": page.get("access_token") or token,
+            "user_id": page["instagram_business_account"]["id"],
+            "page_id": page.get("id"),
+            "page_name": page.get("name"),
+            "expires_at": None,
+        }
+
     accounts = session.get(f"{graph}/me/accounts", timeout=30, params={
         "fields": "id,name,access_token,instagram_business_account",
         "access_token": token,
     })
-    pages = [page for page in _body(accounts, "Could not list Facebook Pages").get("data", [])
+    data = _body(accounts, "Could not list Facebook Pages").get("data") or []
+    pages = [page for page in data
              if isinstance(page, dict) and page.get("instagram_business_account")]
     if not pages:
-        raise AuthError("No Facebook Page with a linked Instagram professional account was "
-                        "found. Link the Instagram account to a Page, then try again.")
+        names = ", ".join(str(page.get("name", "unnamed")) for page in data
+                          if isinstance(page, dict))
+        if not data:
+            who = ""
+            try:
+                me = session.get(f"{graph}/me", timeout=30,
+                                 params={"fields": "id,name", "access_token": token})
+                if me.status_code == 200:
+                    identity = me.json()
+                    label = identity.get("name") or identity.get("id")
+                    if label:
+                        who = f" (authorized as {label})"
+            except Exception:
+                who = ""
+            raise AuthError(
+                "Facebook returned no Pages for this token" + who + ". That profile has no "
+                "role on the Page, or the Page was not granted in the dialog. Re-authorize "
+                "as the Page's admin and grant access to your Page, then try again.")
+        raise AuthError(
+            f"No Instagram professional account is linked to: {names}. "
+            "Link the Instagram account to that Page inside the Instagram app, "
+            "then authorize again.")
     page = pages[0]
     return {
         "access_token": page.get("access_token") or token,
@@ -316,6 +347,21 @@ def _exchange_facebook(settings, code, redirect_uri, session):
         "page_name": page.get("name"),
         "expires_at": None,
     }
+
+
+def _page_by_id(graph, page_id, token, session):
+    """Read one Page directly, bypassing me/accounts discovery."""
+    response = session.get(f"{graph}/{page_id}", timeout=30, params={
+        "fields": "id,name,access_token,instagram_business_account",
+        "access_token": token,
+    })
+    page = _body(response, f"Could not read Page {page_id}")
+    if not page.get("instagram_business_account"):
+        raise AuthError(
+            f"{page_id} is reachable but has no linked Instagram professional account. "
+            "If this is a personal profile rather than a Page, use the Page's own ID "
+            "(Business Settings → Accounts → Pages).")
+    return page
 
 
 def _body(response, message):
