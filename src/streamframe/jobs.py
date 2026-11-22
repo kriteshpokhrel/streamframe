@@ -70,6 +70,11 @@ ROLLING_EXPORTS = "rolling-exports"
 ROLLING_SOURCES = "rolling-sources"
 ROLLING_EDITS = ".rolling-edits"
 CANDIDATE_FIELDS = {"id", "start", "end", "score", "evidence", "words", "face_crop", "content_crop", "opening_title"}
+# Platforms the publish worker understands; configuration decides which are usable.
+PUBLISH_PLATFORMS = ("youtube", "instagram", "tiktok")
+# Automatic export keeps two moments only when they show mostly different
+# footage; at this overlap of the shorter clip, the better one wins alone.
+AUTO_EXPORT_OVERLAP = 0.5
 DIAGNOSTIC_HISTORY_LIMIT = 24
 DIAGNOSTIC_STAGES = {"queued", "import", "trim", "resolve", "download", "capture", "rolling",
                      "analysis", "export", "completed", "failed", "cancelled", "interrupted"}
@@ -86,6 +91,13 @@ DIAGNOSTIC_ERRORS = {
     "UnexpectedError": "An unexpected processing error occurred.",
 }
 YOUTUBE_VOD_ERROR = "Bounded YouTube VOD import is unavailable: no verified time-to-byte index"
+
+
+def _auto_publish_default():
+    """App-level default for new jobs; a job may still override it."""
+    return os.environ.get("STREAMFRAME_PUBLISH_AUTO", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 def _diagnostic_error(exc):
@@ -397,6 +409,23 @@ def analyze_media(path, progress, cancelled, *, cache_transcription=True):
         "candidates": candidates,
         "source_words": [{key: word[key] for key in ("start", "end", "text")} for word in words],
     }
+
+
+BUNDLED_BRAND_DIR = Path(__file__).resolve().parent / "assets" / "lobby-crew"
+
+
+def brand_preset(root):
+    """Return the Lobby Crew preset directory for a data root, if one applies.
+
+    A ``lobby-crew`` directory in the data root overrides the bundled artwork so
+    one machine can use different logos without editing the repository. The
+    bundled preset keeps exports branded on a fresh clone; ``None`` means
+    unbranded exports.
+    """
+    override = Path(root) / "lobby-crew"
+    if override.is_dir():
+        return override
+    return BUNDLED_BRAND_DIR if BUNDLED_BRAND_DIR.is_dir() else None
 
 
 def render_candidate(path, candidate, output_path, progress, cancelled, *, max_output_bytes=None,
@@ -861,6 +890,17 @@ def import_remote(source, directory, event, *, allow_shorter=False, on_resolved=
             staged.unlink(missing_ok=True)
 
 
+def same_moment(first, second, overlap=AUTO_EXPORT_OVERLAP):
+    """True when two candidates mostly cover the same footage.
+
+    Measures how much of the shorter clip the other one already covers, so a
+    trimmed moment that sits inside another is treated as the same moment.
+    """
+    covered = min(first["end"], second["end"]) - max(first["start"], second["start"])
+    shorter = min(first["end"] - first["start"], second["end"] - second["start"])
+    return shorter > 0 and covered > 0 and covered / shorter >= overlap
+
+
 def validate_candidate(candidate):
     """Canonical JSON candidate schema shared by adapters and PATCH."""
     if not isinstance(candidate, dict):
@@ -883,8 +923,8 @@ def validate_candidate(candidate):
         raise ValueError("Evidence must be a list of strings")
     result.setdefault("words", [])
     if "opening_title" in result and (not isinstance(result["opening_title"], str)
-                                     or len(result["opening_title"]) > 60):
-        raise ValueError("Opening title must be a string of at most 60 characters")
+                                     or len(result["opening_title"]) > 90):
+        raise ValueError("Opening title must be a string of at most 90 characters")
     if not isinstance(result["words"], list) or len(result["words"]) > 100000:
         raise ValueError("Invalid words")
     previous_start = -1.0
@@ -1157,7 +1197,8 @@ def _remove_owned_directory(parent_fd, name, entry, device):
 
 
 class JobStore:
-    def __init__(self, root, import_roots=None, analyzer=None, renderer=None, workers=2):
+    def __init__(self, root, import_roots=None, analyzer=None, renderer=None, workers=2,
+                 publisher=None):
         if not isinstance(workers, int) or isinstance(workers, bool) or not 1 <= workers <= 16:
             raise ValueError("workers must be between 1 and 16")
         self.root = Path(root).expanduser().resolve()
@@ -1178,6 +1219,12 @@ class JobStore:
         self.active = {}
         self.corrections = {}
         self.rolling_disks = {}
+        # Publishing is a separate, single-threaded side channel: it must never
+        # consume render workers or fail a job.
+        self.publisher = publisher
+        self.publish_queue = queue.Queue()
+        self.publish_guard = threading.Lock()
+        self.publish_thread = None
         self.closed = False
         self.db = self.root / "jobs.sqlite3"
         with self.connect() as db:
@@ -1432,9 +1479,23 @@ class JobStore:
             self._save(db, job)
             return job
 
-    def create(self, source, auto_export=None):
+    def create(self, source, auto_export=None, auto_publish=None,
+               publish_platforms=None, publish_privacy=None, publish_title=None):
         if not isinstance(source, dict) or source.get("type") not in ("file", "url", "streamer"):
             raise ValueError("source requires type=file, url, or streamer")
+        if auto_publish is not None and type(auto_publish) is not bool:
+            raise ValueError("auto_publish must be a boolean")
+        if publish_platforms is not None:
+            if (not isinstance(publish_platforms, list) or not publish_platforms
+                    or len(set(publish_platforms)) != len(publish_platforms)
+                    or any(platform not in PUBLISH_PLATFORMS for platform in publish_platforms)):
+                raise ValueError("publish_platforms must be a non-empty list of "
+                                 + ", ".join(PUBLISH_PLATFORMS))
+        if publish_privacy is not None and publish_privacy not in {"public", "unlisted", "private"}:
+            raise ValueError("publish_privacy must be public, unlisted or private")
+        if publish_title is not None and (not isinstance(publish_title, str)
+                                          or not 1 <= len(publish_title.strip()) <= 100):
+            raise ValueError("A publish title of 1 to 100 characters is required")
         if source["type"] == "file":
             if set(source) - {"type", "path", "start", "end"} or not isinstance(source.get("path"), str):
                 raise ValueError("Invalid file source fields")
@@ -1452,10 +1513,18 @@ class JobStore:
             if not isinstance(auto_export, dict) or set(auto_export) - {"title"}:
                 raise ValueError("Auto-export settings may only include title")
             title = auto_export.get("title")
-            if title is not None and (not isinstance(title, str) or len(title) > 60):
-                raise ValueError("Auto-export title must be null or a string of up to 60 characters")
+            if title is not None and (not isinstance(title, str) or len(title) > 90):
+                raise ValueError("Auto-export title must be null or a string of up to 90 characters")
             if source.get("rolling"):
                 raise ValueError("Auto-export of the best moments is not available for rolling capture")
+        if auto_publish:
+            # A clip must never go out under an auto-generated filename.
+            fallback = (auto_export or {}).get("title")
+            resolved = (publish_title.strip() if isinstance(publish_title, str)
+                        else fallback.strip() if isinstance(fallback, str) else "")
+            if not resolved:
+                raise ValueError("Automatic upload requires a title for the clips")
+            publish_title = resolved
         with self.lock:
             if self.closed:
                 raise Conflict("Job runner is stopped")
@@ -1467,6 +1536,11 @@ class JobStore:
             job = dict(id=job_id, source=source, status="queued", stage="queued", progress=0,
                        candidates=[], exports=[], media_url=None, error=None,
                        operation="analyze", export_candidate_id=None,
+                       auto_publish=(_auto_publish_default() if auto_publish is None
+                                     else auto_publish),
+                       publish_platforms=publish_platforms,
+                       publish_privacy=publish_privacy,
+                       publish_title=publish_title,
                        created_at=time.time(), updated_at=time.time())
             if auto_export is not None:
                 job["auto_export"] = auto_export
@@ -1935,10 +2009,10 @@ class JobStore:
     def _render_export(self, job_id, media, candidate, progress, event, *, remaining=None):
         filename = uuid.uuid4().hex + ".mp4"
         output = self.root / job_id / filename
-        brand_dir = self.root / "lobby-crew"
+        brand_dir = brand_preset(self.root)
         published = False
         try:
-            if self.renderer is render_candidate and brand_dir.is_dir():
+            if self.renderer is render_candidate and brand_dir is not None:
                 self.renderer(media, candidate, output, progress, event, brand_dir=brand_dir)
             else:
                 self.renderer(media, candidate, output, progress, event)
@@ -1957,6 +2031,8 @@ class JobStore:
         finally:
             if not published:
                 output.unlink(missing_ok=True)
+        if published:
+            self._auto_publish(job_id, candidate, output)
 
     def _run_auto_exports(self, job, media, progress, event):
         pending = job["auto_export_pending"]
@@ -2026,13 +2102,24 @@ class JobStore:
                             or (Path(current["source"]["path"]).stem if current["source"]["type"] == "file" else "")
                         )
                         ranked = sorted(candidates, key=lambda item: item.get("score", 0), reverse=True)[:2]
-                        eligible = [item for item in ranked if item.get("face_crop") is not None and (omit_title or title)]
+                        usable = [item for item in ranked if item.get("face_crop") is not None and (omit_title or title)]
+                        eligible = []
+                        for item in usable:
+                            if not any(same_moment(item, kept) for kept in eligible):
+                                eligible.append(item)
                         for item in eligible:
-                            item["opening_title"] = title[:60].rstrip()
+                            item["opening_title"] = title[:90].rstrip()
                         current["auto_export_pending"] = [item["id"] for item in eligible]
                         if len(eligible) < 2:
-                            current["auto_export_notice"] = ("Auto-export needs a title. Open a moment to add one."
-                                                             if not omit_title and not title else "Fewer than two ranked moments had usable webcam framing. Review the remaining moments manually.")
+                            if not omit_title and not title:
+                                notice = "Auto-export needs a title. Open a moment to add one."
+                            elif len(usable) < 2:
+                                notice = ("Fewer than two ranked moments had usable webcam framing. "
+                                          "Review the remaining moments manually.")
+                            else:
+                                notice = ("The top two moments covered the same footage, so only the "
+                                          "better one was exported.")
+                            current["auto_export_notice"] = notice
                     self._save(db, current)
                 if "auto_export_pending" in current:
                     self._run_auto_exports(current, media, progress, event)
@@ -2365,6 +2452,7 @@ class JobStore:
                 published_bytes = size
                 _sync_path(exports)
                 state("succeeded", record=record)
+            self._auto_publish(job_id, candidate, exports / filename)
         except Cancelled:
             state("cancelled", "Export cancelled; previous exports are unchanged")
         except Exception as exc:
@@ -2394,6 +2482,195 @@ class JobStore:
             raise KeyError(filename or "media")
         return path
 
+    # -- manual publishing ----------------------------------------------
+
+    def publish_export(self, job_id, filename, platforms=None,
+                       title=None, caption=None, privacy=None):
+        """Queue one finished export for publishing on selected platforms.
+
+        Returns immediately; outcomes land in ``publish_results``. Each platform
+        is attempted independently, so one failure never blocks the others, and
+        the publish ledger keeps a re-click from posting twice.
+        """
+        if (not isinstance(filename, str)
+                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename)):
+            raise ValueError("Invalid export filename")
+        if platforms is not None:
+            if (not isinstance(platforms, list) or not platforms
+                    or len(set(platforms)) != len(platforms)
+                    or any(platform not in PUBLISH_PLATFORMS for platform in platforms)):
+                raise ValueError("platforms must be a non-empty list of "
+                                 + ", ".join(PUBLISH_PLATFORMS))
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 100:
+            raise ValueError("A title of 1 to 100 characters is required")
+        if caption is not None and (not isinstance(caption, str) or len(caption) > 2200):
+            raise ValueError("Caption must be at most 2200 characters")
+        if privacy is not None and privacy not in {"public", "unlisted", "private"}:
+            raise ValueError("privacy must be public, unlisted or private")
+        with self.lock:
+            if self.closed:
+                raise Conflict("Job runner is stopped")
+            job = self.get(job_id)
+            if job.get("deletion_pending"):
+                raise Conflict("Job is being deleted")
+            record = next((entry for entry in job.get("exports", [])
+                           if entry.get("filename") == filename), None)
+            if record is None:
+                raise KeyError(filename)
+            path = self.root / job_id / filename
+            if not path.is_file():
+                rolling = self.root / job_id / ROLLING_EXPORTS / filename
+                path = rolling if rolling.is_file() else path
+            if not path.is_file():
+                raise KeyError(filename)
+            candidate = next((item for item in job["candidates"]
+                              if item.get("id") == record.get("candidate_id")), None)
+            self.publish_queue.put((job_id, dict(candidate or {"id": record.get("candidate_id")}),
+                                   str(path), list(platforms) if platforms else None,
+                                   title.strip(), caption, privacy))
+            self._start_publisher()
+            return self.get(job_id)
+
+    def publish_config(self):
+        """Which platforms the editor may offer, and why one is unavailable."""
+        empty = [{"name": platform, "enabled": False, "configured": False,
+                  "detail": "Publishing configuration is unreadable"}
+                 for platform in PUBLISH_PLATFORMS]
+        try:
+            from .publish.settings import PLATFORMS, Settings as PublishSettings
+
+            settings = PublishSettings.load(data_dir=self.root)
+        except Exception:
+            return {"platforms": empty, "default_privacy": "public"}
+        problems = {}
+        for platform, message in settings.problems():
+            problems.setdefault(platform, message)
+        return {"platforms": [
+            {
+                "name": platform,
+                "enabled": platform in settings.platforms,
+                "configured": platform in settings.platforms and platform not in problems,
+                "detail": (None if platform in settings.platforms and platform not in problems
+                           else problems.get(platform)
+                           or "Not enabled in STREAMFRAME_PUBLISH_PLATFORMS"),
+            }
+            for platform in PLATFORMS
+        ], "default_privacy": settings.youtube.privacy}
+
+    # -- automatic publishing -------------------------------------------
+
+    def _auto_publish(self, job_id, candidate, path):
+        """Queue a finished export for publishing; never fails the export.
+
+        The publish package's ledger is claimed before any network call, so a
+        clip queued twice — or re-queued after a restart — publishes once.
+        """
+        try:
+            if self.closed:
+                return
+            job = self.get(job_id)
+            if not job.get("auto_publish"):
+                return
+            path = Path(path)
+            if not path.is_file():
+                return
+            self.publish_queue.put((
+                job_id, dict(candidate), str(path),
+                job.get("publish_platforms"), job.get("publish_title"), None,
+                job.get("publish_privacy"),
+            ))
+            self._start_publisher()
+        except (KeyError, OSError, ValueError):
+            return
+
+    def _start_publisher(self):
+        with self.publish_guard:
+            if self.publish_thread is not None and self.publish_thread.is_alive():
+                return
+            if self.closed:
+                return
+            self.publish_thread = threading.Thread(target=self._publish_loop, daemon=True)
+            self.publish_thread.start()
+
+    def _publish_loop(self):
+        while True:
+            item = self.publish_queue.get()
+            try:
+                if item is None:
+                    return
+                self._publish_one(*item)
+            except Exception:  # a publisher bug must not kill the worker
+                pass
+            finally:
+                self.publish_queue.task_done()
+
+    def _publish_one(self, job_id, candidate, path, platforms=None,
+                     title=None, caption=None, privacy=None):
+        filename = Path(path).name
+        try:
+            job = self.get(job_id)
+        except KeyError:
+            return
+        try:
+            from .publish import Post
+            from .publish.media import file_digest
+
+            requested = list(platforms) if platforms else None
+            blocked = {}
+            if self.publisher is None:
+                from .publish import Publisher
+                from .publish.settings import Settings as PublishSettings
+                settings = PublishSettings.load(data_dir=self.root)
+                for platform, message in settings.problems():
+                    blocked.setdefault(platform, message)
+                chosen = requested or list(settings.platforms)
+                usable = [p for p in chosen if p not in blocked]
+                results = [{"platform": p, "action": "failed", "detail": blocked[p]}
+                           for p in chosen if p in blocked]
+                if not usable:
+                    # Every selected platform is unconfigured: report each one
+                    # separately instead of failing the whole request.
+                    self._record_publish(job_id, filename, results)
+                    return
+                publisher = Publisher(settings)
+            else:
+                publisher, usable, results = self.publisher, requested, []
+
+            resolved = (title or "").strip()
+            if not resolved:
+                resolved = (candidate.get("opening_title") or "").strip()
+            if not resolved:
+                resolved = str((job.get("resolved_source") or {}).get("title") or "").strip()
+            if not resolved:
+                resolved = Path(job.get("source", {}).get("path", "clip")).stem
+            body = (caption or "").strip() or resolved
+            post = Post(path=Path(path), clip_key=file_digest(path), title=resolved,
+                        caption=body, description=body, privacy=privacy)
+            outcomes = publisher.publish(post, platforms=usable)
+            results.extend([
+                {"platform": o.platform, "action": o.action, "url": o.url, "detail": o.detail}
+                for o in outcomes
+            ])
+            self._record_publish(job_id, filename, results)
+        except Exception as exc:
+            self._record_publish(job_id, filename, [], note=type(exc).__name__)
+
+    def _record_publish(self, job_id, filename, results, note=None):
+        entries = list(results) or [
+            {"action": "failed", "detail": note or "Publishing failed"}
+        ]
+        stamp = datetime.now(timezone.utc).isoformat()
+        try:
+            with self.lock, self.connect() as db:
+                job = self._get(db, job_id)
+                history = job.get("publish_results", [])
+                for entry in entries:
+                    history.append({**entry, "filename": filename, "at": stamp})
+                job["publish_results"] = history[-50:]
+                self._save(db, job)
+        except (KeyError, OSError, sqlite3.Error):
+            return
+
     def close(self):
         with self.lock:
             self.closed = True
@@ -2401,6 +2678,10 @@ class JobStore:
             for event, _ in active:
                 event.set()
         for _, thread in active:
+            thread.join(timeout=3)
+        thread = self.publish_thread
+        if thread is not None and thread.is_alive():
+            self.publish_queue.put(None)
             thread.join(timeout=3)
         with self.lock:
             if not self.active and not self.corrections:

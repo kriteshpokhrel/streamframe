@@ -16,6 +16,7 @@ are not supported.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import os
@@ -53,6 +54,31 @@ OUTRO_FRAMES = round(OUTRO_SECONDS * 30)
 TITLE_VIOLET = "0x392279"
 TITLE_SECONDS = 2.4
 TITLE_Y = WEBCAM_HEIGHT + 2
+# The card sits a little above the divider so mobile playback controls and
+# account text at the bottom do not crowd the hook.
+TITLE_CARD_Y = TITLE_Y - 28
+TITLE_CARD_HEIGHT = 190
+TITLE_MAX_CHARS = 90
+TITLE_MAX_LINES = 3
+TITLE_MAX_SIZE = 62
+TITLE_MIN_SIZE = 34
+# Text room in the card beside the inset logo, in output pixels. Lines stay a
+# little narrower than the full 716 px so a wider fallback font still fits.
+TITLE_WIDTH = 686
+# Burned-in captions end above Instagram's organic bottom UI margin (319 px),
+# so the account row and caption text never cover the last line. Raise this to
+# 672 to stay inside Meta's stricter Reels-ad safe area.
+CAPTION_MARGIN_V = 319
+# Bundled fonts for glyphs the system cannot supply; libass never falls back
+# to them on macOS, so emoji runs switch font explicitly.
+FONT_DIR = Path(__file__).resolve().parent / "assets" / "fonts"
+EMOJI_FONT = "Noto Emoji"
+
+# Words that read badly at the end of a line, as in "BREAKS HIS / SETUP".
+_TITLE_TRAILING = frozenset(
+    "a an the and or but of to in on at for with while his her their our your "
+    "my its this that from as by into onto over under".split()
+)
 
 
 def _brand_images(directory: Path) -> tuple[Path, Path]:
@@ -160,36 +186,83 @@ def _ass_time(centiseconds: int) -> str:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{hundredths:02d}"
 
 
+def _title_width(line: str) -> float:
+    """Approximate advance width of ``line`` in em units.
+
+    The per-character factors come from measuring rendered lines: ASS glyphs
+    are narrower than a naive box model, so the sum is scaled to match.
+    """
+    return 0.8 * sum(
+        1.05 if ord(c) > 127 or c in "MW@" else
+        0.32 if c in " ilI.,!:;'|" else
+        0.69 if c.isupper() else 0.54
+        for c in line
+    )
+
+
+def _title_penalty(lines: list[str]) -> float:
+    """Penalize breaks that split a short phrase or orphan the last word."""
+    penalty = 0.0
+    for line in lines[:-1]:
+        last = line.rsplit(" ", 1)[-1].lower().strip('.,;:!?"“”()')
+        if last in _TITLE_TRAILING:
+            penalty += 4
+        if line.endswith((",", ";", ":")):
+            penalty -= 1
+    if len(lines) > 1 and len(lines[-1].split()) == 1:
+        penalty += 8
+    return penalty
+
+
 def _branded_title_layout(title: str) -> tuple[list[str], int]:
-    def width(line: str) -> float:
-        return sum(
-            1.05 if ord(c) > 127 or c in "MW@" else
-            0.32 if c in " ilI.,!:;'|" else
-            0.69 if c.isupper() else 0.54
-            for c in line
-        )
+    """Split the hook into at most three lines and pick the largest font size.
 
-    def size(lines: list[str], maximum: int) -> int:
-        return min(maximum, int(630 / max(map(width, lines))))
+    Every word split is scored instead of taking the shortest pair: breaks
+    that keep short phrases together win, and ties prefer a wider last line,
+    which is the shape of the approved title card.
+    """
+    words = title.split()
+    if not words:
+        return [], TITLE_MAX_SIZE
+    best: tuple[tuple[float, float, float], list[str], int] | None = None
+    for count in range(1, min(TITLE_MAX_LINES, len(words)) + 1):
+        for cuts in itertools.combinations(range(1, len(words)), count - 1):
+            bounds = (0, *cuts, len(words))
+            lines = [" ".join(words[bounds[i]:bounds[i + 1]]) for i in range(count)]
+            widths = [_title_width(line) for line in lines]
+            size = min(TITLE_MAX_SIZE, int(TITLE_WIDTH / max(widths)))
+            key = (size // 8, -_title_penalty(lines), widths[-1] - max(widths))
+            if best is None or key > best[0]:
+                best = (key, lines, size)
+    _, lines, size = best
+    return lines, max(TITLE_MIN_SIZE, size)
 
-    if size([title], 58) == 58:
-        return [title], 58
-    breaks = [i for i, c in enumerate(title) if c == " "] or list(range(1, len(title)))
-    pairs = [[title[:i], title[i:].lstrip()] for i in breaks]
-    lines = min(pairs, key=lambda pair: max(map(width, pair)))
-    font_size = size(lines, 58)
-    if font_size < 42 and len(breaks) >= 2:
-        triples = ([title[:i], title[i:j].lstrip(), title[j:].lstrip()]
-                   for index, i in enumerate(breaks) for j in breaks[index + 1:])
-        three = min(triples, key=lambda group: max(map(width, group)))
-        if size(three, 42) > font_size:
-            return three, size(three, 42)
-    return lines, font_size
+
+def _is_emoji(character: str) -> bool:
+    code = ord(character)
+    return (0x1F000 <= code <= 0x1FAFF or 0x2600 <= code <= 0x27BF
+            or 0x2B00 <= code <= 0x2BFF or 0x1F1E6 <= code <= 0x1F1FF
+            or code in (0x200D, 0xFE0F))
+
+
+def _title_text(text: str, font: str, size: int) -> str:
+    """Switch to the bundled emoji font for emoji runs, then back again."""
+    runs = []
+    for emoji, group in itertools.groupby(text, _is_emoji):
+        run = "".join(group)
+        if emoji:
+            # Noto Emoji has taller metrics than the title font; drawing it a
+            # little smaller keeps the line height inside the card.
+            emoji_size = max(1, round(size * 0.9))
+            runs.append(rf"{{\fn{EMOJI_FONT}\fs{emoji_size}}}{run}{{\fn{font}\fs{size}}}")
+        else:
+            runs.append(run)
+    return "".join(runs)
 
 
 def _ass(words: list[tuple[float, float, str]], title: str = "", duration: float = 0,
          outro_start: float | None = None) -> str:
-    header = """[Script Info]
+    header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: 1080
 PlayResY: 1920
@@ -198,7 +271,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,64,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,100,100,250,1
+Style: Default,Arial,64,&H00FFFFFF,&H0000FFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,100,100,{CAPTION_MARGIN_V},1
 Style: Opening,Arial,58,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,5,158,158,0,1
 Style: BrandedTitle,DejaVu Sans,41,&H00FCF4FF,&H00FCF4FF,&H00FCF4FF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1
 Style: Social,Arial,47,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,&H00170B25,-1,0,0,0,100,100,0,0,1,0,0,4,0,0,0,1
@@ -211,13 +284,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     if title and outro_start is not None:
         end_cs = max(1, round(min(duration, TITLE_SECONDS) * 100))
         prefix = f"0:00:00.00,{_ass_time(end_cs)},BrandedTitle,,0,0,0,,"
-        card = "m 0 0 l 864 0 864 172 0 172"
-        events.append(rf"Dialogue: 1,{prefix}{{\an7\pos(108,{TITLE_Y - 86})\bord0\1c&H792239&\p1}}{card}")
-        events.append(rf"Dialogue: 2,{prefix}{{\an7\pos(108,{TITLE_Y - 86})\bord0\1c&HDD96B0&\p1}}"
-                      r"m 0 0 l 864 0 864 172 0 172 m 3 3 l 3 169 861 169 861 3")
+        top = TITLE_CARD_Y - TITLE_CARD_HEIGHT // 2
+        card = f"m 0 0 l 864 0 864 {TITLE_CARD_HEIGHT} 0 {TITLE_CARD_HEIGHT}"
+        events.append(rf"Dialogue: 1,{prefix}{{\an7\pos(108,{top})\bord0\1c&H792239&\p1}}{card}")
+        events.append(rf"Dialogue: 2,{prefix}{{\an7\pos(108,{top})\bord0\1c&HDD96B0&\p1}}"
+                      f"m 0 0 l 864 0 864 {TITLE_CARD_HEIGHT} 0 {TITLE_CARD_HEIGHT} "
+                      f"m 3 3 l 3 {TITLE_CARD_HEIGHT - 3} 861 {TITLE_CARD_HEIGHT - 3} 861 3")
         lines, font_size = _branded_title_layout(title)
-        text = r"\N".join(lines)
-        events.append(rf"Dialogue: 3,{prefix}{{\pos(614,{TITLE_Y})\q2\fs{font_size}}}{text}")
+        text = r"\N".join(_title_text(line, "DejaVu Sans", font_size) for line in lines)
+        events.append(rf"Dialogue: 3,{prefix}{{\pos(614,{TITLE_CARD_Y - 2})\q2\fs{font_size}}}{text}")
     elif title:
         end_cs = max(1, round(min(duration, TITLE_SECONDS) * 100))
         center = WEBCAM_HEIGHT + 5
@@ -226,7 +301,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         events.append(rf"Dialogue: 1,{prefix}{{\an7\pos(120,{center - 86})\bord3\1c&H250B17&\1a&H12&\p1}}{card}")
         longest = max(map(len, title.split()))
         font_size = min(58, 730 // longest)
-        events.append(rf"Dialogue: 2,{prefix}{{\pos(540,{center})\fs{font_size}}}{title}")
+        events.append(rf"Dialogue: 2,{prefix}{{\pos(540,{center})\fs{font_size}}}"
+                      f"{_title_text(title, 'Arial', font_size)}")
     offset = 0
     while offset < len(words):
         limit = offset + 1
@@ -269,6 +345,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return header + "\n".join(events) + "\n"
 
 
+def _ass_filter(name: str, source: str = "") -> str:
+    """Build an ``ass`` filter that can also reach the bundled glyph fonts."""
+    value = f"filename='{name}'"
+    if FONT_DIR.is_dir():
+        fonts = str(FONT_DIR).replace("\\", "\\\\").replace("'", r"\'").replace(":", r"\:")
+        value += f":fontsdir='{fonts}'"
+    return f"{source}ass={value}"
+
+
 def _filter_crop(rect: tuple[float, float, float, float], *, fit: bool = False) -> str:
     x, y, width, height = rect
     panel_height = WEBCAM_HEIGHT if fit else SCREEN_HEIGHT
@@ -295,6 +380,7 @@ def _brand_video(frames: int, title_seconds: float) -> str:
     outro_input = "[outro_logo]" if title_seconds else "[2:v]"
     return (
         f";[stack]fps=30,trim=end_frame={frames},setpts=N/(30*TB),split[main][tail];"
+        # The bundled wordmark is authored 172px wide, so this renders it 1:1.
         "[1:v]scale=172:-2:flags=lanczos,format=rgba,colorchannelmixer=aa=0.53[mark];"
         f"[main][mark]overlay=x=(W-w)/2:y={TITLE_Y}-h/2:enable='gte(t,{title_seconds:.2f})'[marked];"
         f"[tail]trim=start_frame={max(0, frames - OUTRO_FRAMES)},setpts=PTS-STARTPTS,"
@@ -355,7 +441,7 @@ def render_clip(
     ``brand_dir`` is an optional local Lobby Crew preset with watermark.png
     and outro.png. It adds a centered watermark, title badge, and animated
     silent outro over a blurred replay, after a brief source-audio fade.
-    ``opening_title`` overlays up to 60 characters without adding footage.
+    ``opening_title`` overlays up to 90 characters without adding footage.
     Both tools may be executable paths. Existing output survives any failure.
     """
     start = _number(start, "start")
@@ -365,8 +451,8 @@ def render_clip(
     face = _crop(facecam_crop, "facecam_crop")
     content = _crop(content_crop, "content_crop")
     captions = _words(words, start, end)
-    if not isinstance(opening_title, str) or len(opening_title) > 60:
-        raise ValueError("Opening title must be a string of at most 60 characters")
+    if not isinstance(opening_title, str) or len(opening_title) > TITLE_MAX_CHARS:
+        raise ValueError(f"Opening title must be a string of at most {TITLE_MAX_CHARS} characters")
     if not isinstance(include_audio, bool):
         raise ValueError("include_audio must be a bool")
     if max_output_bytes is not None and (type(max_output_bytes) is not int or max_output_bytes < 1):
@@ -416,16 +502,16 @@ def render_clip(
             subtitle_path.write_text(_ass(captions, opening_title, clip_seconds, clip_frames / 30),
                                      encoding="utf-8")
             graph += _brand_video(clip_frames, title_seconds)
-            graph += f";[finished]ass=filename='{subtitle_path.name}'"
+            graph += ";" + _ass_filter(subtitle_path.name, "[finished]")
             if title_seconds:
                 graph += ("[titled];[badge_logo]scale=124:124:force_original_aspect_ratio=decrease:"
                           f"force_divisible_by=2:flags=lanczos,pad=124:124:(ow-iw)/2:(oh-ih)/2:color={TITLE_VIOLET}[badge];"
-                          f"[titled][badge]overlay=x=132:y={TITLE_Y - 62}:enable='lt(t,{title_seconds:.2f})'")
+                          f"[titled][badge]overlay=x=132:y={TITLE_CARD_Y - 62}:enable='lt(t,{title_seconds:.2f})'")
             graph += "[decorated]"
         elif captions or _display_text(opening_title):
             subtitle_path.write_text(_ass(captions, opening_title, clip_seconds), encoding="utf-8")
             # The generated basename contains no filter-grammar metacharacters.
-            graph += f";[stack]ass=filename='{subtitle_path.name}'[captioned]"
+            graph += ";" + _ass_filter(subtitle_path.name, "[stack]") + "[captioned]"
         else:
             graph += ";[stack]null[captioned]"
         video = "decorated" if images else "captioned"

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { describe, exportedVideos, exportFiles, failedSourceStatus, getDiagnostics, getJob, isRollingJob, jobControls, jobPath, listJobs, parseSourceTime, request, saveCandidate, startExport, streamerSource } from './api';
-import type { Candidate, CandidateChanges, ExportedVideo, ExportFile, Job, Rect, Word } from './types';
+import { describe, exportedVideos, exportFiles, failedSourceStatus, getDiagnostics, getJob, getPublishConfig, isRollingJob, jobControls, jobPath, listJobs, parseSourceTime, publishExport, publishLabel, publishResultsFor, request, saveCandidate, startExport, streamerSource } from './api';
+import type { Candidate, CandidateChanges, ExportedVideo, ExportFile, Job, PublishOptions, PublishPlatform, PublishResult, Rect, Word } from './types';
 import { parseRoute, routeHash, type Route } from './navigation';
 
 const editable = ['start', 'end', 'words', 'face_crop', 'content_crop', 'opening_title'] as const;
@@ -78,6 +78,11 @@ export default function App() {
   const [autoExport, setAutoExport] = useState(false);
   const [autoTitleMode, setAutoTitleMode] = useState<'source' | 'none' | 'custom'>('source');
   const [autoTitle, setAutoTitle] = useState('');
+  const [uploadOnAdd, setUploadOnAdd] = useState(false);
+  const [uploadPlatforms, setUploadPlatforms] = useState<string[]>([]);
+  const [uploadPrivacy, setUploadPrivacy] = useState('public');
+  const [uploadTitle, setUploadTitle] = useState('');
+  const [publishConfig, setPublishConfig] = useState<PublishOptions | null>(null);
   const [platform, setPlatform] = useState<'twitch' | 'youtube'>('twitch');
   const [sourceMode, setSourceMode] = useState<'auto' | 'live' | 'latest'>('auto');
   const [captureDuration, setCaptureDuration] = useState('60');
@@ -104,6 +109,16 @@ export default function App() {
   const heading = useRef<HTMLHeadingElement>(null);
   const exportUrls = useRef<string[]>([]);
   useEffect(() => () => { exportUrls.current.forEach((url) => URL.revokeObjectURL(url)); }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getPublishConfig(controller.signal).then((config) => {
+      setPublishConfig(config);
+      setUploadPrivacy(config.default_privacy);
+      setUploadPlatforms(config.platforms.filter((entry) => entry.configured).map((entry) => entry.name));
+    }).catch(() => { /* the upload block stays unavailable if this fails */ });
+    return () => controller.abort();
+  }, []);
   const selectedRef = useRef(selectedId);
   selectedRef.current = selectedId;
   const detailVersion = useRef(0);
@@ -267,6 +282,13 @@ export default function App() {
       if (sourceType === 'streamer' && !rolling && (!Number.isFinite(duration) || duration < 1 || duration > 300)) {
         throw new Error('Streamer capture duration must be between 1 and 300 seconds.');
       }
+      if (uploadOnAdd) {
+        if (!rolling && !autoExport) {
+          throw new Error('Turn on automatic export, or start a rolling session, so there are clips to upload.');
+        }
+        if (!uploadPlatforms.length) throw new Error('Choose at least one platform to upload to.');
+        if (!uploadTitle.trim()) throw new Error('Enter a title for the uploaded clips.');
+      }
       let payload;
       if (sourceType === 'streamer') {
         const resolved = streamerSource(source, platform, sourceMode, duration);
@@ -282,7 +304,13 @@ export default function App() {
         method: 'POST', body: JSON.stringify({ source: payload,
           ...(autoExport && !rolling ? { auto_export: {
             title: autoTitleMode === 'custom' ? autoTitle.trim() : autoTitleMode === 'none' ? null : undefined,
-          } } : {}) }),
+          } } : {}),
+          ...(uploadOnAdd ? {
+            auto_publish: true,
+            publish_platforms: uploadPlatforms,
+            publish_privacy: uploadPrivacy,
+            publish_title: uploadTitle.trim(),
+          } : {}) }),
       });
       if (!created?.id) throw new Error('The server did not return a job id.');
       setDirty(false);
@@ -292,6 +320,7 @@ export default function App() {
       navigate({ view: rolling ? 'live' : 'review', jobId: created.id }, true);
       setSource(''); setRangeStart(''); setRangeEnd('');
       setAutoExport(false); setAutoTitleMode('source'); setAutoTitle('');
+      setUploadOnAdd(false); setUploadTitle('');
     } catch (err) { setError(message(err)); }
     finally { setBusy(false); }
   }
@@ -450,9 +479,9 @@ export default function App() {
             <p className="muted small permission-note">Use content you have permission to use, and credit its owner when required.</p>
             {!(sourceType === 'streamer' && sourceMode === 'live' && liveOutput === 'rolling') &&
               <div className="auto-export-settings">
-                <label className="check"><input type="checkbox" checked={autoExport} onChange={(event) => setAutoExport(event.target.checked)} /> Automatically export the two highest-ranked moments</label>
+                <label className="check"><input type="checkbox" checked={autoExport} onChange={(event) => setAutoExport(event.target.checked)} /> Automatically export up to two highest-ranked moments</label>
                 {autoExport && <>
-                  <label className="field">Opening title for both clips
+                  <label className="field">Opening title for the exported clips
                     <select value={autoTitleMode} onChange={(event) => {
                       const mode = event.target.value;
                       if (mode === 'source' || mode === 'none' || mode === 'custom') setAutoTitleMode(mode);
@@ -464,11 +493,50 @@ export default function App() {
                     {autoTitleMode === 'source' && <span className="small">Uses the imported video title, or the filename for a local video.</span>}
                   </label>
                   {autoTitleMode === 'custom' && <label className="field">Custom opening title
-                    <input value={autoTitle} required maxLength={60} onChange={(event) => setAutoTitle(event.target.value)} />
+                    <input value={autoTitle} required maxLength={90} onChange={(event) => setAutoTitle(event.target.value)} />
                   </label>}
-                  <span className="muted small">Clips without usable webcam framing are left for review.</span>
+                  <span className="muted small">Clips without usable webcam framing are left for review. When the two best moments cover the same footage, only the better one is exported.</span>
                 </>}
               </div>}
+            <div className="auto-export-settings upload-source">
+              <label className="check"><input type="checkbox" checked={uploadOnAdd}
+                onChange={(event) => setUploadOnAdd(event.target.checked)} /> Upload finished clips to social platforms</label>
+              {uploadOnAdd && <>
+                {publishConfig ? <>
+                  <div className="upload-to-picks">
+                    {publishConfig.platforms.map((entry) => <label key={entry.name}
+                      className={`upload-pick${entry.configured ? ' ready' : ' unavailable'}`}
+                      title={entry.detail ?? undefined}>
+                      <input type="checkbox" checked={uploadPlatforms.includes(entry.name)}
+                        disabled={!entry.configured}
+                        onChange={() => setUploadPlatforms((old) => old.includes(entry.name)
+                          ? old.filter((name) => name !== entry.name) : [...old, entry.name])} />
+                      <span>{entry.name}</span>
+                      {!entry.configured && <span className="small">unavailable</span>}
+                    </label>)}
+                  </div>
+                  <div className="upload-to-fields">
+                    <label className="field">Title for uploaded clips
+                      <input value={uploadTitle} maxLength={100} required
+                        placeholder="Required — the line viewers read first"
+                        onChange={(event) => setUploadTitle(event.target.value)} />
+                    </label>
+                    <label className="field">YouTube privacy
+                      <select value={uploadPrivacy} onChange={(event) => setUploadPrivacy(event.target.value)}>
+                        <option value="public">Public</option>
+                        <option value="unlisted">Unlisted</option>
+                        <option value="private">Private</option>
+                      </select>
+                    </label>
+                  </div>
+                  {uploadPrivacy === 'public' && <p className="upload-hint">
+                    Public — each clip goes live as soon as it finishes uploading.</p>}
+                  {!autoExport && !(sourceType === 'streamer' && sourceMode === 'live' && liveOutput === 'rolling') &&
+                    <p className="upload-hint error">Turn on automatic export, or start a rolling session,
+                      so there are clips to upload.</p>}
+                </> : <p className="muted small">Reading publishing configuration…</p>}
+              </>}
+            </div>
             <div className="actions import-actions">
               <button type="button" disabled={busy} onClick={() => navigate({ view: 'sources' })}>Back to sources</button>
               <button className="primary" type="submit" disabled={busy || !source.trim()}>{busy ? 'Adding source…' : sourceType === 'streamer' && sourceMode === 'live' ? 'Start live capture' : 'Find moments'}</button>
@@ -804,6 +872,139 @@ function ReviewExports(props: React.ComponentProps<typeof ExportLibrary>) {
   </details>;
 }
 
+function exportTitle(job: Job, file: ExportedVideo): string {
+  // A filename is not a title: leave it blank so the upload asks for one.
+  const candidate = job.candidates.find((item) => item.id === file.candidateId);
+  return (candidate?.opening_title || job.resolved_source?.title || '').trim();
+}
+
+function UploadTo({ job, file }: { job: Job; file: ExportedVideo }) {
+  const [platforms, setPlatforms] = useState<PublishPlatform[] | null>(null);
+  const [configError, setConfigError] = useState('');
+  const [selected, setSelected] = useState<string[]>([]);
+  const [title, setTitle] = useState(() => exportTitle(job, file));
+  const [privacy, setPrivacy] = useState('public');
+  const [sending, setSending] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [results, setResults] = useState<PublishResult[]>(() => publishResultsFor(job, file.name));
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getPublishConfig(controller.signal).then((config) => {
+      setPlatforms(config.platforms);
+      setPrivacy(config.default_privacy);
+      setSelected(config.platforms.filter((entry) => entry.configured).map((entry) => entry.name));
+    }).catch((error) => {
+      if (!controller.signal.aborted) setConfigError(error instanceof Error ? error.message : String(error));
+    });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    setResults(publishResultsFor(job, file.name));
+    setTitle(exportTitle(job, file));
+  }, [job, file.name]);
+
+  const enabled = (platforms ?? []).filter((entry) => entry.configured);
+  const allSelected = enabled.length > 0 && selected.length === enabled.length;
+  const latest = Array.from(new Map(results.map((entry) => [entry.platform, entry])).values());
+  const trimmed = title.trim();
+  const titleError = trimmed.length === 0 ? 'This clip has no title yet — add one before uploading.'
+    : trimmed.length > 100 ? 'Keep the title to 100 characters.' : '';
+  const ready = !titleError && selected.length > 0 && !sending;
+
+  async function upload() {
+    if (!ready) return;
+    const baseline = results.length;
+    setSending(true);
+    setNotice('');
+    try {
+      await publishExport(job.id, file.name, { platforms: selected, title: trimmed, privacy });
+      const deadline = Date.now() + 180_000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const fresh = publishResultsFor(await getJob(job.id), file.name);
+        if (fresh.length > baseline) {
+          setResults(fresh);
+          const failed = fresh.slice(baseline).filter((entry) => entry.action === 'failed');
+          setNotice(failed.length
+            ? `${failed.length} of ${selected.length} failed; the others were still attempted.`
+            : 'Upload finished.');
+          return;
+        }
+      }
+      setNotice('Still uploading. This card updates when the platform answers.');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return <section className="upload-to" aria-label={`Upload ${file.name} to social platforms`}>
+    <div className="upload-to-head">
+      <h4>Upload to</h4>
+      {sending && <span className="muted small" role="status">Sending…</span>}
+    </div>
+    {configError && <p className="notice error">{configError}</p>}
+    {!platforms && !configError && <p className="muted small">Checking which platforms are configured…</p>}
+    {platforms && <>
+      <div className="upload-to-picks">
+        {platforms.map((entry) => <label key={entry.name}
+          className={`upload-pick${entry.configured ? ' ready' : ' unavailable'}`}
+          title={entry.detail ?? undefined}>
+          <input type="checkbox" checked={selected.includes(entry.name)}
+            disabled={!entry.configured || sending}
+            onChange={() => setSelected((old) => old.includes(entry.name)
+              ? old.filter((name) => name !== entry.name) : [...old, entry.name])} />
+          <span>{entry.name}</span>
+          {!entry.configured && <span className="muted small">unavailable</span>}
+        </label>)}
+      </div>
+      <div className="upload-to-fields">
+        <label className="field upload-title">
+          <span>Title</span>
+          <input value={title} maxLength={100} disabled={sending}
+            aria-invalid={titleError ? true : undefined}
+            placeholder="The line viewers read first"
+            onChange={(event) => setTitle(event.target.value)} />
+        </label>
+        <label className="field upload-privacy">
+          <span>YouTube privacy</span>
+          <select value={privacy} disabled={sending}
+            onChange={(event) => setPrivacy(event.target.value)}>
+            <option value="public">Public</option>
+            <option value="unlisted">Unlisted</option>
+            <option value="private">Private</option>
+          </select>
+        </label>
+      </div>
+      {titleError && <p className="upload-hint error">{titleError}</p>}
+      {!titleError && privacy === 'public' && <p className="upload-hint">
+        Public — this is live on the channel as soon as the upload finishes.</p>}
+      <div className="actions">
+        <button className="button primary" disabled={!ready} onClick={upload}>
+          {sending ? 'Uploading…'
+            : allSelected && enabled.length > 1 ? `Upload to all ${selected.length}`
+            : `Upload to ${selected.length} platform${selected.length === 1 ? '' : 's'}`}
+        </button>
+        <span className="muted small">{trimmed.length}/100</span>
+        {enabled.length === 0 && <span className="muted small">Configure a platform in .env to upload.</span>}
+      </div>
+    </>}
+    {notice && <p className="small muted" role="status">{notice}</p>}
+    {latest.length > 0 && <ul className="upload-results">
+      {latest.map((result) => <li key={result.platform} className={result.action}>
+        <span className="upload-dot" aria-hidden="true" />
+        <strong>{result.platform}</strong>
+        <span>{publishLabel(result)}</span>
+        {result.url && <a href={result.url} target="_blank" rel="noreferrer">Open</a>}
+        {result.action === 'failed' && result.detail && <span className="muted small">{result.detail}</span>}
+      </li>)}
+    </ul>}
+  </section>;
+}
+
 function ExportLibrary({ jobs, files, busy, heading, sourceId, onFilter, onEdit, onDelete, compact, onDeleteAll }: {
   jobs: Job[]; files: ExportedVideo[]; busy: boolean; heading?: React.RefObject<HTMLHeadingElement>;
   sourceId?: string; onFilter?: (sourceId?: string) => void;
@@ -892,6 +1093,8 @@ function ExportLibrary({ jobs, files, busy, heading, sourceId, onFilter, onEdit,
             : 'Export date unavailable'}</p>
           <div className="actions"><a className="button primary" href={file.url} download={file.name}>Download</a>
             {canEdit && onEdit && <button disabled={busy} onClick={() => onEdit(file)}>Edit source</button>}</div>
+          {job && !job.deletion_pending && job.exports?.some((entry) => entry.filename === file.name) &&
+            <UploadTo job={job} file={file} />}
           <div className="export-card-footer">
           <details className="export-details"><summary>File details</summary>
           <dl className="export-provenance">
@@ -1403,13 +1606,13 @@ function CandidateEditor({ job, candidate, momentNumber, rolling = false, onDirt
         <fieldset id="clip-correction-fields" className="editor-fields" disabled={locked} hidden={!inspector}><legend className="sr-only">Correction fields</legend>
         {inspector === 'opening' && <section className="crop-column">
           <label className="field">Opening title (optional)
-            <input ref={openingTitleInput} maxLength={60} value={draft.opening_title ?? ''} placeholder="e.g. One button changed everything"
+            <input ref={openingTitleInput} maxLength={90} value={draft.opening_title ?? ''} placeholder="e.g. One button changed everything"
               onChange={(event) => {
                 const opening_title = event.target.value;
                 setDraft((old) => ({ ...old, opening_title }));
               }} />
           </label>
-          <p className="muted small">{(draft.opening_title ?? '').length}/60 characters. Shown for the first 2.4 seconds over the playing clip.</p>
+          <p className="muted small">{(draft.opening_title ?? '').length}/90 characters. Shown for the first 2.4 seconds over the playing clip.</p>
         </section>}
         {inspector === 'framing' && <div className="crop-column">
           <label className="field">Preview guides<select value={cropView} onChange={(event) => setCropView(event.target.value as typeof cropView)}>
