@@ -271,6 +271,25 @@ def test_english_dub_does_not_replace_a_non_english_original(extraction, monkeyp
     assert not fetch.opened
 
 
+def test_english_audio_marked_with_a_negative_preference_is_accepted(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    picture, sound = CDN + "picture", CDN + "sound"
+    fetch.bodies.update({picture: b"\x00\x00\x00\x20ftyp" + b"x" * 24,
+                         sound: b"\x00\x00\x00\x20ftyp" + b"x" * 24})
+    for url, mime in [(picture, "video/mp4"), (sound, "audio/mp4")]:
+        fetch.headers[url, "Content-Type"] = mime
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=picture, height=1080, protocol="https", vcodec="avc1", acodec="none"),
+        # What YouTube returns today: one English track, preference -1.
+        dict(url=sound, protocol="https", vcodec="none", acodec="mp4a.40.2",
+             language="en", language_preference=-1),
+    ]))
+    with patch.object(jobs, "trim_media", return_value="ok.mp4"):
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, None, None,
+                                      full_video=True, require_hd=True) == "ok.mp4"
+    assert fetch.opened == [picture, sound]
+
+
 @pytest.mark.parametrize("failure", [None, "incorrect-offset", "inconsistent-total", "truncated", "request-cap"])
 def test_full_track_is_reassembled_when_whole_get_is_denied(extraction, monkeypatch, tmp_path, failure):
     event, fetch = extraction
