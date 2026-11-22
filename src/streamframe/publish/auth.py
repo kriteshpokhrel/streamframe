@@ -32,6 +32,8 @@ INSTAGRAM_TOKEN = "https://api.instagram.com/oauth/access_token"
 # /refresh_access_token. Using one for both breaks the 60-day token.
 INSTAGRAM_EXCHANGE = "https://graph.instagram.com/access_token"
 INSTAGRAM_SCOPES = "instagram_business_basic,instagram_business_content_publish"
+# Page-linked (Facebook Login) variant. New Meta apps only offer this or Unified.
+FACEBOOK_SCOPES = "instagram_basic,instagram_content_publish,pages_show_list,pages_read_engagement"
 TIKTOK_AUTHORIZE = "https://www.tiktok.com/v2/auth/authorize/"
 TIKTOK_SCOPES = "video.upload,user.info.basic"
 DEFAULT_PORT = 8766
@@ -84,13 +86,23 @@ def authorize(settings: Settings, platform, *, redirect_uri=None, port=DEFAULT_P
     elif platform == "instagram":
         if not settings.instagram.configured:
             raise ConfigError("Instagram app credentials are not configured")
-        url = INSTAGRAM_AUTHORIZE + "?" + urlencode({
-            "client_id": settings.instagram.app_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": INSTAGRAM_SCOPES,
-            "state": state,
-        })
+        if settings.instagram.login == "facebook":
+            url = (f"https://www.facebook.com/{settings.instagram.api_version}/dialog/oauth?"
+                   + urlencode({
+                       "client_id": settings.instagram.app_id,
+                       "redirect_uri": redirect_uri,
+                       "response_type": "code",
+                       "scope": FACEBOOK_SCOPES,
+                       "state": state,
+                   }))
+        else:
+            url = INSTAGRAM_AUTHORIZE + "?" + urlencode({
+                "client_id": settings.instagram.app_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": INSTAGRAM_SCOPES,
+                "state": state,
+            })
     elif platform == "tiktok":
         if not settings.tiktok.configured:
             raise ConfigError("TikTok client credentials are not configured")
@@ -211,6 +223,8 @@ def _exchange(settings, platform, code, redirect_uri, verifier, session):
         }
 
     if platform == "instagram":
+        if settings.instagram.login == "facebook":
+            return _exchange_facebook(settings, code, redirect_uri, session)
         short = session.post(INSTAGRAM_TOKEN, timeout=30, data={
             "client_id": settings.instagram.app_id,
             "client_secret": settings.instagram.app_secret,
@@ -257,6 +271,63 @@ def _exchange(settings, platform, code, redirect_uri, verifier, session):
         }
 
     raise ConfigError(f"Unknown platform {platform}")
+
+
+def _exchange_facebook(settings, code, redirect_uri, session):
+    """User token -> long-lived user token -> the Page's Instagram account.
+
+    The Page access token from a long-lived user token is what publishes Reels,
+    so no refresh schedule is needed; if Meta invalidates it, re-run auth.
+    """
+    graph = f"https://graph.facebook.com/{settings.instagram.api_version}"
+    short = session.get(f"{graph}/oauth/access_token", timeout=30, params={
+        "client_id": settings.instagram.app_id,
+        "client_secret": settings.instagram.app_secret,
+        "redirect_uri": redirect_uri,
+        "code": code,
+    })
+    token = _body(short, "Facebook token exchange failed").get("access_token")
+    if not token:
+        raise AuthError("Facebook returned no access token")
+
+    long_lived = session.get(f"{graph}/oauth/access_token", timeout=30, params={
+        "grant_type": "fb_exchange_token",
+        "client_id": settings.instagram.app_id,
+        "client_secret": settings.instagram.app_secret,
+        "fb_exchange_token": token,
+    })
+    if long_lived.status_code == 200:
+        token = long_lived.json().get("access_token", token)
+
+    accounts = session.get(f"{graph}/me/accounts", timeout=30, params={
+        "fields": "id,name,access_token,instagram_business_account",
+        "access_token": token,
+    })
+    pages = [page for page in _body(accounts, "Could not list Facebook Pages").get("data", [])
+             if isinstance(page, dict) and page.get("instagram_business_account")]
+    if not pages:
+        raise AuthError("No Facebook Page with a linked Instagram professional account was "
+                        "found. Link the Instagram account to a Page, then try again.")
+    page = pages[0]
+    return {
+        "access_token": page.get("access_token") or token,
+        "user_id": page["instagram_business_account"]["id"],
+        "page_id": page.get("id"),
+        "page_name": page.get("name"),
+        "expires_at": None,
+    }
+
+
+def _body(response, message):
+    if response.status_code != 200:
+        raise AuthError(f"{message} (HTTP {response.status_code})")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise AuthError(message) from exc
+    if not isinstance(payload, dict):
+        raise AuthError(message)
+    return payload
 
 
 def _payload(response, message):

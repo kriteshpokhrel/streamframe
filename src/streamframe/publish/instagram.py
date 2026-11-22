@@ -33,7 +33,10 @@ class InstagramClient:
 
     @property
     def base(self):
-        return f"https://graph.instagram.com/{self.settings.instagram.api_version}"
+        version = self.settings.instagram.api_version
+        host = ("graph.facebook.com" if self.settings.instagram.login == "facebook"
+                else "graph.instagram.com")
+        return f"https://{host}/{version}"
 
     def publish(self, post: Post) -> PublishResult:
         credentials = store_for(self.settings).get("instagram")

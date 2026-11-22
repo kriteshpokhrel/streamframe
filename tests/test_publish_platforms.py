@@ -176,6 +176,13 @@ def test_instagram_stops_when_the_container_errors(tmp_path):
                         sleep=lambda _: None).publish(clip(tmp_path))
 
 
+def test_instagram_uses_the_facebook_host_for_page_linked_accounts(tmp_path):
+    settings = make_settings(tmp_path)
+    page_linked = replace(settings, instagram=replace(settings.instagram, login="facebook"))
+    assert InstagramClient(page_linked, FakeHost()).base == "https://graph.facebook.com/v23.0"
+    assert InstagramClient(settings, FakeHost()).base == "https://graph.instagram.com/v23.0"
+
+
 def test_instagram_requires_a_public_host(tmp_path):
     settings = make_settings(tmp_path)
     store_credentials(settings, instagram={"access_token": "t", "user_id": "42",

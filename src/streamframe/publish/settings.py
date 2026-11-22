@@ -134,6 +134,10 @@ class InstagramSettings:
     app_secret: str | None = None
     api_version: str = "v23.0"
     share_to_feed: bool = True
+    # "instagram": graph.instagram.com, no Facebook Page.
+    # "facebook": graph.facebook.com, Instagram account linked to a Page.
+    # New Meta apps are only offered the Facebook/Unified variants.
+    login: str = "instagram"
 
     @property
     def configured(self):
@@ -226,6 +230,9 @@ class Settings:
         if media.catbox_expiry not in CATBOX_EXPIRY:
             raise ConfigError("STREAMFRAME_CATBOX_EXPIRY must be one of "
                               + ", ".join(CATBOX_EXPIRY))
+        login = (_text(environ.get("STREAMFRAME_INSTAGRAM_LOGIN")) or "instagram").lower()
+        if login not in {"instagram", "facebook"}:
+            raise ConfigError("STREAMFRAME_INSTAGRAM_LOGIN must be instagram or facebook")
 
         privacy = (_text(environ.get("STREAMFRAME_YOUTUBE_PRIVACY")) or "public").lower()
         if privacy not in {"public", "unlisted", "private"}:
@@ -248,6 +255,7 @@ class Settings:
                 app_secret=_text(environ.get("STREAMFRAME_INSTAGRAM_APP_SECRET")),
                 api_version=_text(environ.get("STREAMFRAME_INSTAGRAM_API_VERSION")) or "v23.0",
                 share_to_feed=_flag(environ.get("STREAMFRAME_INSTAGRAM_SHARE_TO_FEED"), True),
+                login=login,
             ),
             tiktok=TikTokSettings(
                 client_key=_text(environ.get("STREAMFRAME_TIKTOK_CLIENT_KEY")),
