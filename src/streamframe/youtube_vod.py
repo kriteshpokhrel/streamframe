@@ -247,9 +247,10 @@ def _original_english(info):
         return lambda f: english(f.get("language")) and f.get("language_preference") == 10
     if not english(info.get("language")) or any(not english(language) for language in languages):
         return lambda _: False
-    return lambda f: (
-        english(f.get("language")) or f.get("language") is None
-    ) and (not _number(f.get("language_preference")) or f["language_preference"] >= 0)
+    # Every audio track here is English (or unlabelled), so a negative
+    # preference is yt-dlp's default marker rather than a dubbed track.
+    # YouTube now reports -1 for the only audio track on ordinary videos.
+    return lambda f: english(f.get("language")) or f.get("language") is None
 
 
 def _hls_archive(info, duration, fetch, *, require_hd=False):
