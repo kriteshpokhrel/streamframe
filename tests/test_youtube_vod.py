@@ -121,6 +121,42 @@ def test_selective_import_reads_only_overlapping_segments_and_trims_local_fd(ext
     assert resolved == [("Synthetic archive", 12)]
 
 
+def test_separate_video_and_audio_hls_supports_a_range(extraction, monkeypatch, tmp_path):
+    event, fetch = extraction
+    video_manifest, audio_manifest = CDN + "video.m3u8", CDN + "audio.m3u8"
+
+    def playlist(names):
+        return ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+                "#EXT-X-TARGETDURATION:5\n"
+                + "".join(f"#EXTINF:5,\n{CDN}{name}.ts\n" for name in names)
+                + "#EXT-X-ENDLIST\n").encode()
+
+    fetch.bodies[video_manifest] = playlist([f"v{i}" for i in range(4)])
+    fetch.bodies[audio_manifest] = playlist([f"a{i}" for i in range(4)])
+    for manifest in (video_manifest, audio_manifest):
+        fetch.headers[(manifest, "Content-Type")] = "application/x-mpegurl"
+    for index in range(4):
+        fetch.bodies[CDN + f"v{index}.ts"] = TS
+        fetch.bodies[CDN + f"a{index}.ts"] = b"ID3" + b"\x00" * 40
+    monkeypatch.setattr(sources, "youtube_vod_metadata", lambda *_: info(formats=[
+        dict(url=video_manifest, protocol="m3u8_native", vcodec="avc1", acodec="none",
+             height=720),
+        dict(url=audio_manifest, protocol="m3u8_native", vcodec="none", acodec="mp4a.40.2",
+             language="en-US", language_preference=10),
+    ]))
+
+    def trim(fd, directory, start, end, cancel, **options):
+        assert (start, end) == (1, 7)
+        assert options["audio_staged"] is False
+        assert options["audio_adts"] is True
+        return "separate.mp4"
+
+    with patch.object(jobs, "trim_media", side_effect=trim):
+        assert vod.import_youtube_vod(PAGE, tmp_path, event, 6, 12) == "separate.mp4"
+    assert fetch.opened == [video_manifest, audio_manifest,
+                            CDN + "v1.ts", CDN + "v2.ts", CDN + "a1.ts", CDN + "a2.ts"]
+
+
 @pytest.mark.parametrize("start,end,full,success", [
     (None, None, True, True), (0, 20, False, True), (1, 15, False, False),
 ])
@@ -564,9 +600,9 @@ def test_rejects_unverified_index(extraction, body):
 
 @pytest.mark.parametrize(("metadata", "message"), [
     (info(live_status="post_live", duration=85542), "still processing"),
-    (info(formats=[{"protocol": "http_dash_segments", "url": CDN + "archive.mpd"}]), "no supported muxed HLS"),
-    (info(formats=[{"protocol": "https", "url": CDN + "direct.mp4"}]), "no supported muxed HLS"),
-    (info(formats=[{**info()["formats"][0], "acodec": "none"}]), "no supported muxed HLS"),
+    (info(formats=[{"protocol": "http_dash_segments", "url": CDN + "archive.mpd"}]), "no supported muxed or separate"),
+    (info(formats=[{"protocol": "https", "url": CDN + "direct.mp4"}]), "no supported muxed or separate"),
+    (info(formats=[{**info()["formats"][0], "acodec": "none"}]), "no supported muxed or separate"),
     (info(availability="subscriber_only"), "finished, public"),
     (info(has_drm=True), "unencrypted"),
 ])

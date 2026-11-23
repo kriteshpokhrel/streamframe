@@ -76,7 +76,7 @@ handover prompt and the rules around OAuth consent.
 | Twitch channel | Live capture or latest finished archive when a compatible public HLS stream is available. |
 | Twitch video | A selected range of a compatible finished HLS archive. |
 | YouTube channel or live link | Public live streams with compatible HLS; availability is not guaranteed. |
-| YouTube finished video | Verified 720p or better, with no SD fallback. **Full video** up to five minutes supports compatible MP4, separate MP4/WebM tracks, or HLS. Partial ranges require clear, multiplexed MPEG-TS HLS with a verified timeline. |
+| YouTube finished video | Verified 720p or better, with no SD fallback. **Full video** up to five minutes supports compatible MP4, separate MP4/WebM tracks, or HLS. Partial ranges require clear MPEG-TS HLS — muxed, or separate video and audio renditions — with a verified timeline. |
 | Local file | A backend-readable file or selected range, subject to the configured import roots. |
 
 Remote media is retrieved and cached automatically within the documented
@@ -87,7 +87,7 @@ never fall back to downloading the whole video.
 ## What to expect
 
 - Short live captures and bounded archive imports. Finished YouTube video
-  ranges work only with public, unencrypted, multiplexed MPEG-TS HLS and
+  ranges need public, unencrypted MPEG-TS HLS — muxed or separate tracks — with
   a complete, verified timeline, unless the request covers the entire short
   video. Streams still processing after going offline are not ready. See
   [source formats and limits](START.md#source-formats-and-limits).
