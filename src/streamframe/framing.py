@@ -132,6 +132,19 @@ def _close_rectangles(a, b):
     return all(abs(x - y) <= tolerance for x, y in zip(a, b))
 
 
+def _nested(inner, outer, tolerance=0.08):
+    """True when ``inner`` lies inside ``outer`` up to a small slack.
+
+    A shorter rectangle covering part of the same overlay is a subset of the
+    answer, not a competing boundary hypothesis, so it must not force an
+    abstention.
+    """
+    slack_x = max(2.0, (outer[2] - outer[0]) * tolerance)
+    slack_y = max(2.0, (outer[3] - outer[1]) * tolerance)
+    return (inner[0] >= outer[0] - slack_x and inner[1] >= outer[1] - slack_y
+            and inner[2] <= outer[2] + slack_x and inner[3] <= outer[3] + slack_y)
+
+
 def stable_rectangle(observations, decoded_samples):
     """Find a rectangle repeated on distinct frames, or abstain on a close rival."""
     groups = []
@@ -153,11 +166,20 @@ def stable_rectangle(observations, decoded_samples):
     supported.sort(key=lambda matches: mean_score(matches) * (0.75 + 0.25 * len(matches) / decoded_samples),
                    reverse=True)
     best = supported[0]
-    if any(len(rival) >= 0.8 * len(best) and mean_score(rival) >= mean_score(best) - 0.06
-           for rival in supported[1:]):
+
+    def bounds(matches):
+        return tuple(median(match[1][edge] for match in matches) for edge in range(4))
+
+    best_bounds = bounds(best)
+
+    def conflicts(rival):
+        if len(rival) < 0.8 * len(best) or mean_score(rival) < mean_score(best) - 0.06:
+            return False
+        return not _nested(bounds(rival), best_bounds)
+
+    if any(conflicts(rival) for rival in supported[1:]):
         return None
-    bounds = tuple(median(match[1][edge] for match in best) for edge in range(4))
-    return bounds, [match[2] for match in best]
+    return best_bounds, [match[2] for match in best]
 
 
 def temporal_rectangle(frames, seed, observations):
