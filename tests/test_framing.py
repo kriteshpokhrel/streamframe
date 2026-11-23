@@ -48,6 +48,18 @@ def test_equally_supported_different_rectangles_are_ambiguous():
     assert stable_rectangle(observations, 4) is None
 
 
+def test_nested_variant_of_the_same_overlay_is_not_a_rival():
+    # The same flush overlay seen with a shorter right edge on some frames is a
+    # subset of the boundary, not a competing hypothesis.
+    rects = ((0, 153, 130, 234), (0, 153, 94, 234), (0, 151, 71, 234))
+    observations = [(0.55, rect, index, None) for index in range(4) for rect in rects]
+
+    match = stable_rectangle(observations, 4)
+
+    assert match is not None
+    assert tuple(round(value) for value in match[0]) == (0, 153, 130, 234)
+
+
 def test_webcam_flush_to_two_edges_requires_both_interior_seams():
     def observations(with_seams):
         for index in range(5):
