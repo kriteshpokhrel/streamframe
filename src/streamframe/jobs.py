@@ -597,7 +597,8 @@ def wait_process(command, event, deadline, *, output=None, size_limit=None, **op
 
 
 def trim_media(fd, directory, start, end, event, *, deadline=None, staged=False, audio_fd=None,
-               require_hd=False, video_webm=False, audio_webm=False):
+               require_hd=False, video_webm=False, audio_webm=False, audio_staged=False,
+               audio_adts=False):
     partial = directory / ".trim.mp4"
     target = directory / "source.mp4"
     if event.is_set():
@@ -612,8 +613,13 @@ def trim_media(fd, directory, start, end, event, *, deadline=None, staged=False,
         *([] if staged else ["-ss", f"{start:.6f}"]),
         "-fd", str(fd), "-i", "fd:",
         *([] if audio_fd is None else [
-            "-protocol_whitelist", "fd", "-format_whitelist", "mov,matroska,webm",
-            *(webm_options if audio_webm else local_mov_options), "-ss", f"{start:.6f}",
+            "-protocol_whitelist", "fd",
+            "-format_whitelist", ("mpegts" if audio_staged
+                                  else "aac" if audio_adts else "mov,matroska,webm"),
+            *(["-f", "mpegts"] if audio_staged
+              else ["-f", "aac"] if audio_adts
+              else webm_options if audio_webm else local_mov_options),
+            "-ss", f"{start:.6f}",
             "-fd", str(audio_fd), "-i", "fd:",
         ]),
         *(["-ss", f"{start:.6f}"] if staged else []),
@@ -1517,14 +1523,10 @@ class JobStore:
                 raise ValueError("Auto-export title must be null or a string of up to 90 characters")
             if source.get("rolling"):
                 raise ValueError("Auto-export of the best moments is not available for rolling capture")
-        if auto_publish:
-            # A clip must never go out under an auto-generated filename.
-            fallback = (auto_export or {}).get("title")
-            resolved = (publish_title.strip() if isinstance(publish_title, str)
-                        else fallback.strip() if isinstance(fallback, str) else "")
-            if not resolved:
-                raise ValueError("Automatic upload requires a title for the clips")
-            publish_title = resolved
+        if auto_publish and isinstance(publish_title, str):
+            # An explicit upload title wins; otherwise the export's own title is
+            # used at publish time, and publishing fails if none exists.
+            publish_title = publish_title.strip() or None
         with self.lock:
             if self.closed:
                 raise Conflict("Job runner is stopped")
@@ -2642,7 +2644,13 @@ class JobStore:
             if not resolved:
                 resolved = str((job.get("resolved_source") or {}).get("title") or "").strip()
             if not resolved:
-                resolved = Path(job.get("source", {}).get("path", "clip")).stem
+                # A filename is not a title. Refuse rather than publish badly.
+                self._record_publish(job_id, filename, [
+                    {"platform": platform, "action": "failed",
+                     "detail": "No title to publish with; add one in the editor"}
+                    for platform in (usable or [None])
+                ])
+                return
             body = (caption or "").strip() or resolved
             post = Post(path=Path(path), clip_key=file_digest(path), title=resolved,
                         caption=body, description=body, privacy=privacy)

@@ -77,7 +77,7 @@ class _Segment:
     url: str = field(repr=False)
 
 
-def _index(body, base, expected_duration):
+def _index(body, base, expected_duration, *, require_independent=True):
     try:
         lines = body.decode("utf-8-sig").splitlines()
     except UnicodeError:
@@ -119,7 +119,10 @@ def _index(body, base, expected_duration):
             url = _cdn_url(line, base)
             segments.append(_Segment(position, position + pending, url))
             position, pending = position + pending, None
-    if (not {"#EXT-X-PLAYLIST-TYPE", "#EXT-X-INDEPENDENT-SEGMENTS"} <= headers
+    required = {"#EXT-X-PLAYLIST-TYPE"}
+    if require_independent:
+        required.add("#EXT-X-INDEPENDENT-SEGMENTS")
+    if (not required <= headers
             or not segments or pending is not None
             or abs(position - expected_duration) > 1):
         raise YouTubeVodUnavailable("YouTube HLS does not verify the full archived timeline")
@@ -211,6 +214,79 @@ class YouTubeVod:
                                    **({"require_hd": True} if require_hd else {}))
 
 
+@dataclass
+class _SeparateTracks:
+    """Video-only plus audio-only TS HLS with aligned segment boundaries.
+
+    Some videos expose no muxed stream at all, only a video rendition and one or
+    more audio renditions sharing the same segment timeline. Fetching both for
+    the requested window costs about the same bytes as a muxed fetch.
+    """
+
+    title: str
+    duration: float
+    _video: tuple[_Segment, ...] = field(repr=False)
+    _audio: tuple[_Segment, ...] = field(repr=False)
+    _fetch: object = field(repr=False)
+
+    def acquire(self, directory, start, end, *, allow_shorter=False, on_resolved=None,
+                whole_video=False, require_hd=False):
+        from . import jobs
+
+        self._fetch.check()
+        if not (_number(start) and _number(end) and 0 <= start < end <= start + jobs.MAX_RANGE_SECONDS):
+            raise ValueError("Invalid bounded YouTube VOD range")
+        if allow_shorter:
+            end = min(end, self.duration)
+        if not start < end <= self.duration:
+            raise ValueError("Requested range exceeds the completed YouTube VOD")
+        video = [s for s in self._video if s.start < end and s.end > start]
+        audio = [s for s in self._audio if s.start < end and s.end > start]
+        if not video or not audio:
+            raise YouTubeVodUnavailable("YouTube HLS does not cover the requested range")
+        if video[-1].end < end - 1e-6 or audio[-1].end < end - 1e-6:
+            raise YouTubeVodUnavailable(
+                "YouTube HLS cannot retrieve this range without leaving part of it uncovered"
+            )
+        if abs(video[0].start - audio[0].start) > 0.5:
+            raise YouTubeVodUnavailable("YouTube HLS audio and video segments are not aligned")
+        if len(video) + len(audio) > jobs.MAX_REMOTE_SEGMENTS:
+            raise YouTubeVodUnavailable("YouTube VOD exceeds the cumulative segment-request limit")
+        if on_resolved:
+            on_resolved(self.title, end)
+        origin = video[0].start
+        audio_ts = None
+        with tempfile.TemporaryFile(dir=directory) as video_file, \
+                tempfile.TemporaryFile(dir=directory) as audio_file:
+            for segments, output, is_video in ((video, video_file, True),
+                                               (audio, audio_file, False)):
+                for segment in segments:
+                    self._fetch.check()
+                    _, data = _read(self._fetch, segment.url,
+                                    min(MAX_SEGMENT_BYTES, self._fetch.remaining))
+                    if is_video:
+                        if (len(data) < 188 or len(data) % 188
+                                or data[::188] != b"\x47" * (len(data) // 188)):
+                            raise YouTubeVodUnavailable(
+                                "YouTube HLS segment is not a complete MPEG-TS response"
+                            )
+                    elif audio_ts is None:
+                        # Audio renditions are either MPEG-TS or bare ADTS AAC
+                        # (often behind an ID3 tag), not always the same as video.
+                        audio_ts = (len(data) >= 188 and len(data) % 188 == 0
+                                    and data[::188] == b"\x47" * (len(data) // 188))
+                    output.write(data)
+                output.flush()
+                output.seek(0)
+            return jobs.trim_media(
+                video_file.fileno(), directory, start - origin, end - origin,
+                self._fetch.event, deadline=self._fetch.deadline, staged=True,
+                audio_fd=audio_file.fileno(), audio_staged=bool(audio_ts),
+                audio_adts=not audio_ts,
+                **({"require_hd": True} if require_hd else {}),
+            )
+
+
 def _metadata(url, event, deadline):
     from . import jobs
 
@@ -272,9 +348,7 @@ def _hls_archive(info, duration, fetch, *, require_hd=False):
         variants.append((abs(height - (1080 if require_hd else 360))
                          if _number(height) and height > 0 else 10**8, candidate))
     if not variants:
-        raise YouTubeVodUnavailable(
-            "YouTube exposes no supported muxed HLS archive; no verified selective index for its other formats"
-        )
+        return _separate_archive(info, duration, fetch, original_audio, require_hd=require_hd)
     for _, url in sorted(set(variants))[:MAX_MP4_TRACK_REQUESTS if require_hd else 1]:
         fetch.check()
         try:
@@ -286,6 +360,60 @@ def _hls_archive(info, duration, fetch, *, require_hd=False):
             continue
         # Integer player duration and decimal EXTINF times may round differently at the tail.
         return YouTubeVod(str(info.get("title") or ""), min(duration, segments[-1].end), segments, fetch)
+    raise YouTubeVodUnavailable("No supported YouTube HD HLS archive is available within the import limits")
+
+
+def _separate_archive(info, duration, fetch, original_audio, *, require_hd=False):
+    """Index separate video and audio TS renditions for a bounded range."""
+    from . import jobs
+
+    videos, audios = [], []
+    for item in info["formats"]:
+        if not isinstance(item, dict) or item.get("has_drm"):
+            continue
+        if item.get("protocol") not in {"m3u8", "m3u8_native"}:
+            continue
+        vcodec, acodec = item.get("vcodec"), item.get("acodec")
+        height = item.get("height")
+        try:
+            url = _cdn_url(item.get("url"))
+        except YouTubeVodUnavailable:
+            continue
+        if isinstance(vcodec, str) and vcodec.startswith(("avc1", "h264")) and acodec == "none":
+            if require_hd and not (_number(height) and height >= 720):
+                continue
+            videos.append((abs(height - 720) if _number(height) else 10**8, url))
+        elif vcodec == "none" and original_audio(item):
+            # Prefer the highest-bitrate original-language audio rendition.
+            audios.append((-(_number(item.get("abr")) or 0), url))
+    if not videos or not audios:
+        raise YouTubeVodUnavailable(
+            "YouTube exposes no supported muxed or separate MPEG-TS HLS archive; "
+            "no verified selective index for its other formats"
+        )
+
+    for _, video_url in sorted(set(videos)):
+        fetch.check()
+        try:
+            base, body = _read(fetch, video_url, jobs.MAX_MANIFEST_BYTES, playlist=True)
+            video_segments = _index(body, base, duration, require_independent=False)
+        except YouTubeVodUnavailable:
+            continue
+        for _, audio_url in sorted(set(audios)):
+            fetch.check()
+            try:
+                base, body = _read(fetch, audio_url, jobs.MAX_MANIFEST_BYTES, playlist=True)
+                audio_segments = _index(body, base, duration, require_independent=False)
+            except YouTubeVodUnavailable:
+                continue
+            if len(audio_segments) != len(video_segments) or any(
+                    abs(audio.start - video.start) > 0.5
+                    for audio, video in zip(audio_segments, video_segments)):
+                continue
+            return _SeparateTracks(
+                str(info.get("title") or ""), min(duration, video_segments[-1].end),
+                tuple(video_segments), tuple(audio_segments), fetch,
+            )
     raise YouTubeVodUnavailable("No supported YouTube HD HLS archive is available within the import limits")
 
 
